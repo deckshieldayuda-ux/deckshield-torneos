@@ -66,6 +66,51 @@ export default async function handler(req, res) {
   try {
     switch (action) {
       case "list_tournaments": {
+               case "create_tournament": {
+        const {
+          tournament_name,
+          tournament_date,
+          format = null,
+          tournament_type = null,
+          result = null,
+        } = req.query;
+
+        // Validación mínima
+        if (!tournament_name || !tournament_date) {
+          return res.status(400).json({
+            ok: false,
+            error: "Missing required fields",
+          });
+        }
+
+        const { data, error } = await supabase
+          .from("tournaments")
+          .insert([
+            {
+              customer_id: customerId,
+              tournament_name,
+              tournament_date,
+              format,
+              tournament_type,
+              result,
+            },
+          ])
+          .select()
+          .single();
+
+        if (error) {
+          return res.status(500).json({
+            ok: false,
+            error: "Database insert failed",
+          });
+        }
+
+        return res.status(200).json({
+          ok: true,
+          tournament: data,
+        });
+      }
+
         const tournaments = await listTournaments(customerId);
         return res.status(200).json({
           ok: true,
