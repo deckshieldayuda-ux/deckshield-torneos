@@ -48,7 +48,6 @@ async function createTournament(customerId, query) {
     result = null,
   } = query;
 
-  // Validación mínima
   if (!tournament_name || !tournament_date) {
     return {
       ok: false,
@@ -57,7 +56,6 @@ async function createTournament(customerId, query) {
     };
   }
 
-  // Insert sin rondas/score desde el frontend
   const payload = {
     customer_id: customerId,
     tournament_name,
@@ -65,7 +63,6 @@ async function createTournament(customerId, query) {
     format,
     tournament_type,
     result,
-    // opcional: inicializar explícitamente si tu tabla no tiene default
     rounds: [],
     score: {},
   };
@@ -88,25 +85,76 @@ async function createTournament(customerId, query) {
   return { ok: true, tournament: data };
 }
 
+async function getTournament(customerId, id) {
+  if (!id) return { ok: false, error: "Missing id" };
+
+  const { data, error } = await supabase
+    .from("tournaments")
+    .select("*")
+    .eq("id", id)
+    .eq("customer_id", customerId)
+    .single();
+
+  if (error) {
+    console.error("Supabase get error:", error);
+    return { ok: false, error: "Tournament not found" };
+  }
+
+  return { ok: true, tournament: data };
+}
+
+async function updateTournament(customerId, id, query) {
+  if (!id) return { ok: false, error: "Missing id" };
+
+  // Solo permitimos editar estos campos del torneo "meta"
+  const allowed = [
+    "tournament_name",
+    "tournament_date",
+    "format",
+    "tournament_type",
+    "result",
+  ];
+
+  const updates = {};
+  for (const key of allowed) {
+    if (query[key] !== undefined) updates[key] = query[key];
+  }
+
+  if (Object.keys(updates).length === 0) {
+    return { ok: false, error: "No fields to update" };
+  }
+
+  const { data, error } = await supabase
+    .from("tournaments")
+    .update(updates)
+    .eq("id", id)
+    .eq("customer_id", customerId)
+    .select("*")
+    .single();
+
+  if (error) {
+    console.error("Supabase update error:", error);
+    return { ok: false, error: "Update failed", details: error.message };
+  }
+
+  return { ok: true, tournament: data };
+}
+
 /* =========================
    Main Handler
 ========================= */
 export default async function handler(req, res) {
-  // Shopify App Proxy suele llamar por GET; dejamos todo por query por ahora.
-  // IMPORTANTE: Para Shopify, evitamos 500 para no mostrar pantalla genérica.
-
-  // 1️⃣ Verificar Shopify
+  // 1) Verificar Shopify App Proxy
   const isValid = verifyShopifyProxy(req.query);
   if (!isValid) {
-    // Esto sí puede ser 401 porque ocurre fuera de Shopify normal
-    // pero si prefieres evitar pantallas, cámbialo a 200 también.
+    // 401 está bien aquí; si prefieres evitar cualquier pantalla, cambia a 200
     return res.status(401).json({
       ok: false,
       error: "Invalid Shopify signature",
     });
   }
 
-  // 2️⃣ Identidad
+  // 2) Identidad + acción
   const customerId = req.query.logged_in_customer_id || null;
   const action = req.query.action || null;
 
@@ -117,20 +165,26 @@ export default async function handler(req, res) {
     });
   }
 
-  // 3️⃣ Router interno
+  // 3) Router interno
   try {
     switch (action) {
       case "list_tournaments": {
         const tournaments = await listTournaments(customerId);
-        return res.status(200).json({
-          ok: true,
-          tournaments,
-        });
+        return res.status(200).json({ ok: true, tournaments });
       }
 
       case "create_tournament": {
         const result = await createTournament(customerId, req.query);
-        // Siempre 200 para que Shopify muestre JSON y no pantalla genérica
+        return res.status(200).json(result);
+      }
+
+      case "get_tournament": {
+        const result = await getTournament(customerId, req.query.id);
+        return res.status(200).json(result);
+      }
+
+      case "update_tournament": {
+        const result = await updateTournament(customerId, req.query.id, req.query);
         return res.status(200).json(result);
       }
 
@@ -138,7 +192,12 @@ export default async function handler(req, res) {
         return res.status(200).json({
           ok: false,
           error: "Unknown action",
-          allowed_actions: ["list_tournaments", "create_tournament"],
+          allowed_actions: [
+            "list_tournaments",
+            "create_tournament",
+            "get_tournament",
+            "update_tournament",
+          ],
         });
     }
   } catch (err) {
