@@ -57,6 +57,65 @@ function normalizeSpecial(v) {
   return undefined;
 }
 
+/* =========================
+   Score computation
+========================= */
+function computeScore(rounds) {
+  let wins = 0;
+  let losses = 0;
+  let ties = 0;
+
+  const safeRounds = Array.isArray(rounds) ? rounds : [];
+
+  for (const r of safeRounds) {
+    const special = r?.special ?? null;
+
+    // Acciones especiales ganan prioridad
+    if (special === "BYE" || special === "NO_SHOW") {
+      wins += 1;
+      continue;
+    }
+    if (special === "ID") {
+      ties += 1;
+      continue;
+    }
+
+    const games = Array.isArray(r?.games) ? r.games : [];
+    let w = 0,
+      l = 0;
+    let hasAny = false;
+
+    for (const g of games) {
+      const res = g?.result ?? null;
+      if (res === null) continue;
+      hasAny = true;
+
+      if (res === "W") w += 1;
+      else if (res === "L") l += 1;
+      else if (res === "T") {
+        // Un tie en game sugiere ronda empatada,
+        // pero mantenemos lógica simple por conteo
+      }
+    }
+
+    if (!hasAny) continue;
+
+    if (w > l) wins += 1;
+    else if (l > w) losses += 1;
+    else ties += 1;
+  }
+
+  return {
+    wins,
+    losses,
+    ties,
+    text: `${wins}-${losses}-${ties}`,
+  };
+}
+
+/* =========================
+   DB helpers
+========================= */
 async function getTournamentOwned(customerId, tournamentId) {
   if (!tournamentId) {
     return { ok: false, error: "Missing tournament id" };
@@ -78,9 +137,11 @@ async function getTournamentOwned(customerId, tournamentId) {
 }
 
 async function saveRounds(customerId, tournamentId, rounds) {
+  const score = computeScore(rounds);
+
   const { data, error } = await supabase
     .from("tournaments")
-    .update({ rounds })
+    .update({ rounds, score })
     .eq("id", tournamentId)
     .eq("customer_id", customerId)
     .select("*")
@@ -137,7 +198,7 @@ async function createTournament(customerId, query) {
     tournament_type,
     result,
     rounds: [],
-    score: {},
+    score: computeScore([]),
   };
 
   const { data, error } = await supabase
@@ -286,7 +347,6 @@ async function updateRound(customerId, tournamentId, query) {
   if (query.g2_turn !== undefined && g2t === undefined) return { ok: false, error: "Invalid g2_turn value" };
   if (query.g3_turn !== undefined && g3t === undefined) return { ok: false, error: "Invalid g3_turn value" };
 
-  // apply to game objects by game number
   const byNum = new Map(round.games.map((g) => [Number(g.game), g]));
   const game1 = byNum.get(1) || { game: 1, result: null, turn: null };
   const game2 = byNum.get(2) || { game: 2, result: null, turn: null };
@@ -302,7 +362,6 @@ async function updateRound(customerId, tournamentId, query) {
 
   round.games = [game1, game2, game3];
 
-  // Persist
   rounds[idx] = round;
   return await saveRounds(customerId, tournamentId, rounds);
 }
@@ -311,13 +370,11 @@ async function updateRound(customerId, tournamentId, query) {
    Main Handler
 ========================= */
 export default async function handler(req, res) {
-  // 1) Verificar Shopify App Proxy
   const isValid = verifyShopifyProxy(req.query);
   if (!isValid) {
     return res.status(401).json({ ok: false, error: "Invalid Shopify signature" });
   }
 
-  // 2) Identidad + acción
   const customerId = req.query.logged_in_customer_id || null;
   const action = req.query.action || null;
 
@@ -325,7 +382,6 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true, logged_in: false });
   }
 
-  // 3) Router interno (siempre JSON)
   try {
     switch (action) {
       case "list_tournaments": {
