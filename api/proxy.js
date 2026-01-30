@@ -58,7 +58,7 @@ function normalizeSpecial(v) {
 }
 
 /* =========================
-   Score computation
+   Score + Sanitize
 ========================= */
 function computeScore(rounds) {
   let wins = 0;
@@ -70,7 +70,7 @@ function computeScore(rounds) {
   for (const r of safeRounds) {
     const special = r?.special ?? null;
 
-    // Acciones especiales ganan prioridad
+    // Acciones especiales tienen prioridad
     if (special === "BYE" || special === "NO_SHOW") {
       wins += 1;
       continue;
@@ -81,20 +81,19 @@ function computeScore(rounds) {
     }
 
     const games = Array.isArray(r?.games) ? r.games : [];
-    let w = 0,
-      l = 0;
+    let w = 0;
+    let l = 0;
     let hasAny = false;
 
     for (const g of games) {
       const res = g?.result ?? null;
       if (res === null) continue;
       hasAny = true;
-
       if (res === "W") w += 1;
       else if (res === "L") l += 1;
       else if (res === "T") {
-        // Un tie en game sugiere ronda empatada,
-        // pero mantenemos lógica simple por conteo
+        // tie a nivel juego: lo dejamos para UI,
+        // pero en ronda si W==L cuenta como tie
       }
     }
 
@@ -105,21 +104,50 @@ function computeScore(rounds) {
     else ties += 1;
   }
 
-  return {
-    wins,
-    losses,
-    ties,
-    text: `${wins}-${losses}-${ties}`,
-  };
+  return { wins, losses, ties, text: `${wins}-${losses}-${ties}` };
+}
+
+function sanitizeRounds(rounds) {
+  const safeRounds = Array.isArray(rounds) ? rounds : [];
+  return safeRounds.map((r) => {
+    const round = { ...r };
+
+    // asegurar estructura base
+    round.opponent_deck = round.opponent_deck || { p1: null, p2: null };
+    round.games = Array.isArray(round.games)
+      ? round.games
+      : [
+          { game: 1, result: null, turn: null },
+          { game: 2, result: null, turn: null },
+          { game: 3, result: null, turn: null },
+        ];
+
+    // Si hay special, los juegos NO deben quedar con datos
+    if (round.special === "BYE" || round.special === "NO_SHOW" || round.special === "ID") {
+      round.games = [
+        { game: 1, result: null, turn: null },
+        { game: 2, result: null, turn: null },
+        { game: 3, result: null, turn: null },
+      ];
+    }
+
+    return round;
+  });
+}
+
+function scoreLooksMissing(score) {
+  if (!score) return true;
+  if (typeof score !== "object") return true;
+  // Si está vacío {} o no tiene el campo text, lo consideramos faltante
+  if (!("text" in score)) return true;
+  return false;
 }
 
 /* =========================
    DB helpers
 ========================= */
 async function getTournamentOwned(customerId, tournamentId) {
-  if (!tournamentId) {
-    return { ok: false, error: "Missing tournament id" };
-  }
+  if (!tournamentId) return { ok: false, error: "Missing tournament id" };
 
   const { data, error } = await supabase
     .from("tournaments")
@@ -136,23 +164,35 @@ async function getTournamentOwned(customerId, tournamentId) {
   return { ok: true, tournament: data };
 }
 
-async function saveRounds(customerId, tournamentId, rounds) {
-  const score = computeScore(rounds);
+async function persistRoundsAndScore(customerId, tournamentId, rounds) {
+  const sanitized = sanitizeRounds(rounds);
+  const score = computeScore(sanitized);
 
   const { data, error } = await supabase
     .from("tournaments")
-    .update({ rounds, score })
+    .update({ rounds: sanitized, score })
     .eq("id", tournamentId)
     .eq("customer_id", customerId)
     .select("*")
     .single();
 
   if (error) {
-    console.error("Supabase saveRounds error:", error);
+    console.error("Supabase persistRoundsAndScore error:", error);
     return { ok: false, error: "Failed to save rounds", details: error.message };
   }
 
   return { ok: true, tournament: data };
+}
+
+async function ensureScoreUpToDate(customerId, tournament) {
+  // Si score ya existe y no es vacío, no tocamos nada
+  if (!scoreLooksMissing(tournament.score)) return { ok: true, tournament };
+
+  // Recalcular desde rounds y persistir (auto-repair)
+  const rounds = Array.isArray(tournament.rounds) ? tournament.rounds : [];
+  const fixed = await persistRoundsAndScore(customerId, tournament.id, rounds);
+  if (!fixed.ok) return fixed;
+  return { ok: true, tournament: fixed.tournament };
 }
 
 /* =========================
@@ -209,32 +249,26 @@ async function createTournament(customerId, query) {
 
   if (error) {
     console.error("Supabase insert error:", error);
-    return {
-      ok: false,
-      error: "Database insert failed",
-      details: error.message,
-    };
+    return { ok: false, error: "Database insert failed", details: error.message };
   }
 
   return { ok: true, tournament: data };
 }
 
 async function getTournament(customerId, id) {
-  return await getTournamentOwned(customerId, id);
+  const got = await getTournamentOwned(customerId, id);
+  if (!got.ok) return got;
+
+  // Auto-repair score (y sanitiza si hay special)
+  return await ensureScoreUpToDate(customerId, got.tournament);
 }
 
 async function updateTournament(customerId, id, query) {
   if (!id) return { ok: false, error: "Missing id" };
 
-  const allowed = [
-    "tournament_name",
-    "tournament_date",
-    "format",
-    "tournament_type",
-    "result",
-  ];
-
+  const allowed = ["tournament_name", "tournament_date", "format", "tournament_type", "result"];
   const updates = {};
+
   for (const key of allowed) {
     if (query[key] !== undefined) updates[key] = query[key];
   }
@@ -284,12 +318,11 @@ async function addRound(customerId, tournamentId) {
       { game: 2, result: null, turn: null },
       { game: 3, result: null, turn: null },
     ],
-    special: null, // "ID" | "NO_SHOW" | "BYE" | null
+    special: null,
   };
 
-  rounds.push(newRound);
-
-  return await saveRounds(customerId, tournamentId, rounds);
+  const next = [...rounds, newRound];
+  return await persistRoundsAndScore(customerId, tournamentId, next);
 }
 
 async function updateRound(customerId, tournamentId, query) {
@@ -306,7 +339,7 @@ async function updateRound(customerId, tournamentId, query) {
   const idx = rounds.findIndex((r) => Number(r?.round_number) === roundNumber);
   if (idx === -1) return { ok: false, error: "Round not found" };
 
-  const round = rounds[idx];
+  const round = { ...rounds[idx] };
 
   // Opponent deck (optional)
   const opP1 = toIntOrNull(query.op_p1);
@@ -324,7 +357,7 @@ async function updateRound(customerId, tournamentId, query) {
     round.special = sp;
   }
 
-  // Games (optional)
+  // Games (optional) — si special existe, sanitizeRounds lo va a limpiar
   round.games = Array.isArray(round.games)
     ? round.games
     : [
@@ -362,8 +395,10 @@ async function updateRound(customerId, tournamentId, query) {
 
   round.games = [game1, game2, game3];
 
-  rounds[idx] = round;
-  return await saveRounds(customerId, tournamentId, rounds);
+  const next = [...rounds];
+  next[idx] = round;
+
+  return await persistRoundsAndScore(customerId, tournamentId, next);
 }
 
 /* =========================
