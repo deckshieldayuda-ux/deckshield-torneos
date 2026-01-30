@@ -32,19 +32,74 @@ async function listTournaments(customerId) {
     .order("tournament_date", { ascending: false });
 
   if (error) {
-    throw new Error("Database error");
+    console.error("Supabase list error:", error);
+    throw new Error(error.message || "Database error");
   }
 
-  return data;
+  return data ?? [];
+}
+
+async function createTournament(customerId, query) {
+  const {
+    tournament_name,
+    tournament_date,
+    format = null,
+    tournament_type = null,
+    result = null,
+  } = query;
+
+  // Validación mínima
+  if (!tournament_name || !tournament_date) {
+    return {
+      ok: false,
+      error: "Missing required fields",
+      fields_required: ["tournament_name", "tournament_date"],
+    };
+  }
+
+  // Insert sin rondas/score desde el frontend
+  const payload = {
+    customer_id: customerId,
+    tournament_name,
+    tournament_date,
+    format,
+    tournament_type,
+    result,
+    // opcional: inicializar explícitamente si tu tabla no tiene default
+    rounds: [],
+    score: {},
+  };
+
+  const { data, error } = await supabase
+    .from("tournaments")
+    .insert([payload])
+    .select("*")
+    .single();
+
+  if (error) {
+    console.error("Supabase insert error:", error);
+    return {
+      ok: false,
+      error: "Database insert failed",
+      details: error.message,
+    };
+  }
+
+  return { ok: true, tournament: data };
 }
 
 /* =========================
    Main Handler
 ========================= */
 export default async function handler(req, res) {
+  // Shopify App Proxy suele llamar por GET; dejamos todo por query por ahora.
+  // IMPORTANTE: Para Shopify, evitamos 500 para no mostrar pantalla genérica.
+
   // 1️⃣ Verificar Shopify
   const isValid = verifyShopifyProxy(req.query);
   if (!isValid) {
+    // Esto sí puede ser 401 porque ocurre fuera de Shopify normal
+    // pero si prefieres evitar pantallas, cámbialo a 200 también.
     return res.status(401).json({
       ok: false,
       error: "Invalid Shopify signature",
@@ -66,51 +121,6 @@ export default async function handler(req, res) {
   try {
     switch (action) {
       case "list_tournaments": {
-               case "create_tournament": {
-        const {
-          tournament_name,
-          tournament_date,
-          format = null,
-          tournament_type = null,
-          result = null,
-        } = req.query;
-
-        // Validación mínima
-        if (!tournament_name || !tournament_date) {
-          return res.status(400).json({
-            ok: false,
-            error: "Missing required fields",
-          });
-        }
-
-        const { data, error } = await supabase
-          .from("tournaments")
-          .insert([
-            {
-              customer_id: customerId,
-              tournament_name,
-              tournament_date,
-              format,
-              tournament_type,
-              result,
-            },
-          ])
-          .select()
-          .single();
-
-        if (error) {
-          return res.status(500).json({
-            ok: false,
-            error: "Database insert failed",
-          });
-        }
-
-        return res.status(200).json({
-          ok: true,
-          tournament: data,
-        });
-      }
-
         const tournaments = await listTournaments(customerId);
         return res.status(200).json({
           ok: true,
@@ -118,16 +128,25 @@ export default async function handler(req, res) {
         });
       }
 
+      case "create_tournament": {
+        const result = await createTournament(customerId, req.query);
+        // Siempre 200 para que Shopify muestre JSON y no pantalla genérica
+        return res.status(200).json(result);
+      }
+
       default:
-        return res.status(400).json({
+        return res.status(200).json({
           ok: false,
           error: "Unknown action",
+          allowed_actions: ["list_tournaments", "create_tournament"],
         });
     }
   } catch (err) {
-    return res.status(500).json({
+    console.error("Proxy handler error:", err);
+    return res.status(200).json({
       ok: false,
-      error: "Internal server error",
+      error: "Internal error",
+      details: err?.message || String(err),
     });
   }
 }
