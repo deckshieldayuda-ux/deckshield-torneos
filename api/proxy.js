@@ -31,16 +31,16 @@ function toIntOrNull(v) {
 }
 
 function normalizeResult(v) {
-  if (v === undefined) return undefined; // no tocar
+  if (v === undefined) return undefined;
   if (v === null || v === "" || v === "null") return null;
 
   const up = String(v).toUpperCase();
   if (up === "W" || up === "L" || up === "T") return up;
-  return undefined; // inválido
+  return undefined;
 }
 
 function normalizeTurn(v) {
-  if (v === undefined) return undefined; // no tocar
+  if (v === undefined) return undefined;
   if (v === null || v === "" || v === "null") return null;
 
   const up = String(v).toUpperCase();
@@ -49,7 +49,7 @@ function normalizeTurn(v) {
 }
 
 function normalizeSpecial(v) {
-  if (v === undefined) return undefined; // no tocar
+  if (v === undefined) return undefined;
   if (v === null || v === "" || v === "null") return null;
 
   const up = String(v).toUpperCase();
@@ -70,38 +70,30 @@ function computeScore(rounds) {
   for (const r of safeRounds) {
     const special = r?.special ?? null;
 
-    // Acciones especiales tienen prioridad
     if (special === "BYE" || special === "NO_SHOW") {
-      wins += 1;
+      wins++;
       continue;
     }
     if (special === "ID") {
-      ties += 1;
+      ties++;
       continue;
     }
 
     const games = Array.isArray(r?.games) ? r.games : [];
-    let w = 0;
-    let l = 0;
+    let w = 0, l = 0;
     let hasAny = false;
 
     for (const g of games) {
-      const res = g?.result ?? null;
-      if (res === null) continue;
+      if (!g?.result) continue;
       hasAny = true;
-      if (res === "W") w += 1;
-      else if (res === "L") l += 1;
-      else if (res === "T") {
-        // tie a nivel juego: lo dejamos para UI,
-        // pero en ronda si W==L cuenta como tie
-      }
+      if (g.result === "W") w++;
+      if (g.result === "L") l++;
     }
 
     if (!hasAny) continue;
-
-    if (w > l) wins += 1;
-    else if (l > w) losses += 1;
-    else ties += 1;
+    if (w > l) wins++;
+    else if (l > w) losses++;
+    else ties++;
   }
 
   return { wins, losses, ties, text: `${wins}-${losses}-${ties}` };
@@ -111,18 +103,8 @@ function sanitizeRounds(rounds) {
   const safeRounds = Array.isArray(rounds) ? rounds : [];
   return safeRounds.map((r) => {
     const round = { ...r };
-
-    // asegurar estructura base
     round.opponent_deck = round.opponent_deck || { p1: null, p2: null };
-    round.games = Array.isArray(round.games)
-      ? round.games
-      : [
-          { game: 1, result: null, turn: null },
-          { game: 2, result: null, turn: null },
-          { game: 3, result: null, turn: null },
-        ];
 
-    // Si hay special, los juegos NO deben quedar con datos
     if (round.special === "BYE" || round.special === "NO_SHOW" || round.special === "ID") {
       round.games = [
         { game: 1, result: null, turn: null },
@@ -135,183 +117,83 @@ function sanitizeRounds(rounds) {
   });
 }
 
-function scoreLooksMissing(score) {
-  if (!score) return true;
-  if (typeof score !== "object") return true;
-  // Si está vacío {} o no tiene el campo text, lo consideramos faltante
-  if (!("text" in score)) return true;
-  return false;
-}
-
 /* =========================
    DB helpers
 ========================= */
-async function getTournamentOwned(customerId, tournamentId) {
-  if (!tournamentId) return { ok: false, error: "Missing tournament id" };
-
+async function getTournamentOwned(customerId, id) {
   const { data, error } = await supabase
     .from("tournaments")
     .select("*")
-    .eq("id", tournamentId)
+    .eq("id", id)
     .eq("customer_id", customerId)
     .single();
 
-  if (error) {
-    console.error("Supabase getTournamentOwned error:", error);
-    return { ok: false, error: "Tournament not found" };
-  }
-
+  if (error) return { ok: false, error: "Tournament not found" };
   return { ok: true, tournament: data };
 }
 
-async function persistRoundsAndScore(customerId, tournamentId, rounds) {
-  const sanitized = sanitizeRounds(rounds);
-  const score = computeScore(sanitized);
+async function persistRounds(customerId, id, rounds) {
+  const clean = sanitizeRounds(rounds);
+  const score = computeScore(clean);
 
   const { data, error } = await supabase
     .from("tournaments")
-    .update({ rounds: sanitized, score })
-    .eq("id", tournamentId)
-    .eq("customer_id", customerId)
-    .select("*")
-    .single();
-
-  if (error) {
-    console.error("Supabase persistRoundsAndScore error:", error);
-    return { ok: false, error: "Failed to save rounds", details: error.message };
-  }
-
-  return { ok: true, tournament: data };
-}
-
-async function ensureScoreUpToDate(customerId, tournament) {
-  // Si score ya existe y no es vacío, no tocamos nada
-  if (!scoreLooksMissing(tournament.score)) return { ok: true, tournament };
-
-  // Recalcular desde rounds y persistir (auto-repair)
-  const rounds = Array.isArray(tournament.rounds) ? tournament.rounds : [];
-  const fixed = await persistRoundsAndScore(customerId, tournament.id, rounds);
-  if (!fixed.ok) return fixed;
-  return { ok: true, tournament: fixed.tournament };
-}
-
-/* =========================
-   Actions (existing)
-========================= */
-async function listTournaments(customerId) {
-  const { data, error } = await supabase
-    .from("tournaments")
-    .select("*")
-    .eq("customer_id", customerId)
-    .order("tournament_date", { ascending: false });
-
-  if (error) {
-    console.error("Supabase list error:", error);
-    throw new Error(error.message || "Database error");
-  }
-
-  return data ?? [];
-}
-
-async function createTournament(customerId, query) {
-  const {
-    tournament_name,
-    tournament_date,
-    format = null,
-    tournament_type = null,
-    result = null,
-  } = query;
-
-  if (!tournament_name || !tournament_date) {
-    return {
-      ok: false,
-      error: "Missing required fields",
-      fields_required: ["tournament_name", "tournament_date"],
-    };
-  }
-
-  const payload = {
-    customer_id: customerId,
-    tournament_name,
-    tournament_date,
-    format,
-    tournament_type,
-    result,
-    rounds: [],
-    score: computeScore([]),
-  };
-
-  const { data, error } = await supabase
-    .from("tournaments")
-    .insert([payload])
-    .select("*")
-    .single();
-
-  if (error) {
-    console.error("Supabase insert error:", error);
-    return { ok: false, error: "Database insert failed", details: error.message };
-  }
-
-  return { ok: true, tournament: data };
-}
-
-async function getTournament(customerId, id) {
-  const got = await getTournamentOwned(customerId, id);
-  if (!got.ok) return got;
-
-  // Auto-repair score (y sanitiza si hay special)
-  return await ensureScoreUpToDate(customerId, got.tournament);
-}
-
-async function updateTournament(customerId, id, query) {
-  if (!id) return { ok: false, error: "Missing id" };
-
-  const allowed = ["tournament_name", "tournament_date", "format", "tournament_type", "result"];
-  const updates = {};
-
-  for (const key of allowed) {
-    if (query[key] !== undefined) updates[key] = query[key];
-  }
-
-  if (Object.keys(updates).length === 0) {
-    return { ok: false, error: "No fields to update" };
-  }
-
-  const { data, error } = await supabase
-    .from("tournaments")
-    .update(updates)
+    .update({ rounds: clean, score })
     .eq("id", id)
     .eq("customer_id", customerId)
     .select("*")
     .single();
 
-  if (error) {
-    console.error("Supabase update error:", error);
-    return { ok: false, error: "Update failed", details: error.message };
-  }
-
+  if (error) return { ok: false, error: "Failed to save rounds" };
   return { ok: true, tournament: data };
 }
 
 /* =========================
-   Actions (Rounds)
+   Actions
 ========================= */
-async function addRound(customerId, tournamentId) {
-  const got = await getTournamentOwned(customerId, tournamentId);
+async function listTournaments(customerId) {
+  const { data } = await supabase
+    .from("tournaments")
+    .select("*")
+    .eq("customer_id", customerId)
+    .order("tournament_date", { ascending: false });
+
+  return data ?? [];
+}
+
+async function createTournament(customerId, q) {
+  if (!q.tournament_name || !q.tournament_date) {
+    return { ok: false, error: "Missing required fields" };
+  }
+
+  const { data, error } = await supabase
+    .from("tournaments")
+    .insert([{
+      customer_id: customerId,
+      tournament_name: q.tournament_name,
+      tournament_date: q.tournament_date,
+      format: q.format ?? null,
+      tournament_type: q.tournament_type ?? null,
+      result: q.result ?? "SinTop",
+      rounds: [],
+      score: computeScore([])
+    }])
+    .select("*")
+    .single();
+
+  if (error) return { ok: false, error: "Insert failed" };
+  return { ok: true, tournament: data };
+}
+
+async function addRound(customerId, id) {
+  const got = await getTournamentOwned(customerId, id);
   if (!got.ok) return got;
 
-  const tournament = got.tournament;
-  const rounds = Array.isArray(tournament.rounds) ? tournament.rounds : [];
+  const rounds = got.tournament.rounds || [];
+  const nextNumber = rounds.length + 1;
 
-  const maxRound = rounds.reduce((m, r) => {
-    const n = Number(r?.round_number);
-    return Number.isFinite(n) ? Math.max(m, n) : m;
-  }, 0);
-
-  const newRoundNumber = maxRound + 1;
-
-  const newRound = {
-    round_number: newRoundNumber,
+  rounds.push({
+    round_number: nextNumber,
     opponent_deck: { p1: null, p2: null },
     games: [
       { game: 1, result: null, turn: null },
@@ -319,157 +201,89 @@ async function addRound(customerId, tournamentId) {
       { game: 3, result: null, turn: null },
     ],
     special: null,
-  };
+  });
 
-  const next = [...rounds, newRound];
-  return await persistRoundsAndScore(customerId, tournamentId, next);
+  return await persistRounds(customerId, id, rounds);
 }
 
-async function updateRound(customerId, tournamentId, query) {
-  const roundNumber = toIntOrNull(query.round_number);
-  if (!tournamentId) return { ok: false, error: "Missing tournament id" };
-  if (!roundNumber) return { ok: false, error: "Missing or invalid round_number" };
+async function updateRound(customerId, id, q) {
+  const rn = toIntOrNull(q.round_number);
+  if (!rn) return { ok: false, error: "Invalid round_number" };
 
-  const got = await getTournamentOwned(customerId, tournamentId);
+  const got = await getTournamentOwned(customerId, id);
   if (!got.ok) return got;
 
-  const tournament = got.tournament;
-  const rounds = Array.isArray(tournament.rounds) ? tournament.rounds : [];
-
-  const idx = rounds.findIndex((r) => Number(r?.round_number) === roundNumber);
+  const rounds = got.tournament.rounds || [];
+  const idx = rounds.findIndex(r => r.round_number === rn);
   if (idx === -1) return { ok: false, error: "Round not found" };
 
-  const round = { ...rounds[idx] };
+  const r = rounds[idx];
 
-  // Opponent deck (optional)
-  const opP1 = toIntOrNull(query.op_p1);
-  const opP2 = toIntOrNull(query.op_p2);
-  if (query.op_p1 !== undefined || query.op_p2 !== undefined) {
-    round.opponent_deck = round.opponent_deck || { p1: null, p2: null };
-    if (query.op_p1 !== undefined) round.opponent_deck.p1 = opP1;
-    if (query.op_p2 !== undefined) round.opponent_deck.p2 = opP2;
+  if (q.op_p1 !== undefined) r.opponent_deck.p1 = toIntOrNull(q.op_p1);
+  if (q.op_p2 !== undefined) r.opponent_deck.p2 = toIntOrNull(q.op_p2);
+
+  if (q.special !== undefined) r.special = normalizeSpecial(q.special);
+
+  const g1 = normalizeResult(q.g1);
+  if (g1 !== undefined) r.games[0].result = g1;
+
+  rounds[idx] = r;
+  return await persistRounds(customerId, id, rounds);
+}
+
+async function setFinalResult(customerId, id, result) {
+  const allowed = [
+    "Ganador","Finalista","Top4","Top8","Top16","Top32",
+    "Top64","Top128","Top256","Top512","Top1024",
+    "Droppeado","SinTop"
+  ];
+
+  if (!allowed.includes(result)) {
+    return { ok: false, error: "Invalid final result" };
   }
 
-  // Special (optional)
-  const sp = normalizeSpecial(query.special);
-  if (query.special !== undefined) {
-    if (sp === undefined) return { ok: false, error: "Invalid special value" };
-    round.special = sp;
-  }
+  const { data, error } = await supabase
+    .from("tournaments")
+    .update({ result })
+    .eq("id", id)
+    .eq("customer_id", customerId)
+    .select("*")
+    .single();
 
-  // Games (optional) — si special existe, sanitizeRounds lo va a limpiar
-  round.games = Array.isArray(round.games)
-    ? round.games
-    : [
-        { game: 1, result: null, turn: null },
-        { game: 2, result: null, turn: null },
-        { game: 3, result: null, turn: null },
-      ];
-
-  const g1 = normalizeResult(query.g1);
-  const g2 = normalizeResult(query.g2);
-  const g3 = normalizeResult(query.g3);
-  if (query.g1 !== undefined && g1 === undefined) return { ok: false, error: "Invalid g1 value" };
-  if (query.g2 !== undefined && g2 === undefined) return { ok: false, error: "Invalid g2 value" };
-  if (query.g3 !== undefined && g3 === undefined) return { ok: false, error: "Invalid g3 value" };
-
-  const g1t = normalizeTurn(query.g1_turn);
-  const g2t = normalizeTurn(query.g2_turn);
-  const g3t = normalizeTurn(query.g3_turn);
-  if (query.g1_turn !== undefined && g1t === undefined) return { ok: false, error: "Invalid g1_turn value" };
-  if (query.g2_turn !== undefined && g2t === undefined) return { ok: false, error: "Invalid g2_turn value" };
-  if (query.g3_turn !== undefined && g3t === undefined) return { ok: false, error: "Invalid g3_turn value" };
-
-  const byNum = new Map(round.games.map((g) => [Number(g.game), g]));
-  const game1 = byNum.get(1) || { game: 1, result: null, turn: null };
-  const game2 = byNum.get(2) || { game: 2, result: null, turn: null };
-  const game3 = byNum.get(3) || { game: 3, result: null, turn: null };
-
-  if (query.g1 !== undefined) game1.result = g1;
-  if (query.g2 !== undefined) game2.result = g2;
-  if (query.g3 !== undefined) game3.result = g3;
-
-  if (query.g1_turn !== undefined) game1.turn = g1t;
-  if (query.g2_turn !== undefined) game2.turn = g2t;
-  if (query.g3_turn !== undefined) game3.turn = g3t;
-
-  round.games = [game1, game2, game3];
-
-  const next = [...rounds];
-  next[idx] = round;
-
-  return await persistRoundsAndScore(customerId, tournamentId, next);
+  if (error) return { ok: false, error: "Failed to update result" };
+  return { ok: true, tournament: data };
 }
 
 /* =========================
    Main Handler
 ========================= */
 export default async function handler(req, res) {
-  const isValid = verifyShopifyProxy(req.query);
-  if (!isValid) {
+  if (!verifyShopifyProxy(req.query)) {
     return res.status(401).json({ ok: false, error: "Invalid Shopify signature" });
   }
 
-  const customerId = req.query.logged_in_customer_id || null;
-  const action = req.query.action || null;
+  const customerId = req.query.logged_in_customer_id;
+  const action = req.query.action;
 
-  if (!customerId) {
-    return res.status(200).json({ ok: true, logged_in: false });
-  }
+  if (!customerId) return res.json({ ok: true, logged_in: false });
 
-  try {
-    switch (action) {
-      case "list_tournaments": {
-        const tournaments = await listTournaments(customerId);
-        return res.status(200).json({ ok: true, tournaments });
-      }
+  switch (action) {
+    case "list_tournaments":
+      return res.json({ ok: true, tournaments: await listTournaments(customerId) });
 
-      case "create_tournament": {
-        const result = await createTournament(customerId, req.query);
-        return res.status(200).json(result);
-      }
+    case "create_tournament":
+      return res.json(await createTournament(customerId, req.query));
 
-      case "get_tournament": {
-        const result = await getTournament(customerId, req.query.id);
-        return res.status(200).json(result);
-      }
+    case "add_round":
+      return res.json(await addRound(customerId, req.query.id));
 
-      case "update_tournament": {
-        const result = await updateTournament(customerId, req.query.id, req.query);
-        return res.status(200).json(result);
-      }
+    case "update_round":
+      return res.json(await updateRound(customerId, req.query.id, req.query));
 
-      // ---- ROUNDS ----
-      case "add_round": {
-        const result = await addRound(customerId, req.query.id);
-        return res.status(200).json(result);
-      }
+    case "set_final_result":
+      return res.json(await setFinalResult(customerId, req.query.id, req.query.result));
 
-      case "update_round": {
-        const result = await updateRound(customerId, req.query.id, req.query);
-        return res.status(200).json(result);
-      }
-
-      default:
-        return res.status(200).json({
-          ok: false,
-          error: "Unknown action",
-          allowed_actions: [
-            "list_tournaments",
-            "create_tournament",
-            "get_tournament",
-            "update_tournament",
-            "add_round",
-            "update_round",
-          ],
-        });
-    }
-  } catch (err) {
-    console.error("Proxy handler error:", err);
-    return res.status(200).json({
-      ok: false,
-      error: "Internal error",
-      details: err?.message || String(err),
-    });
+    default:
+      return res.json({ ok: false, error: "Unknown action" });
   }
 }
