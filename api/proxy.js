@@ -175,6 +175,7 @@ async function createTournament(customerId, q) {
       format: q.format ?? null,
       tournament_type: q.tournament_type ?? null,
       result: q.result ?? "SinTop",
+      my_deck: { p1: toIntOrNull(q.my_deck_p1), p2: toIntOrNull(q.my_deck_p2) },
       rounds: [],
       score: computeScore([])
     }])
@@ -268,6 +269,8 @@ export default async function handler(req, res) {
 if (!customerId) return res.json({ ok: false, logged_in: false, error: "Debes iniciar sesión con tu cuenta de Deck Shield para registrar o ver tus torneos." });
 
   switch (action) {
+    case "get_tournament":
+      return res.json(await getTournamentOwned(customerId, req.query.id));
     case "list_tournaments":
       return res.json({ ok: true, tournaments: await listTournaments(customerId) });
 
