@@ -245,10 +245,27 @@ async function updateRound(customerId, id, q) {
 
   rounds[idx] = r;
 
+  let finalRounds = rounds;
+  if (r.special === "DROP") {
+    finalRounds = rounds.filter(rr => rr.round_number <= rn);
+  }
+
   const extra = (r.special === "DROP") ? { result: "Droppeado" } : {};
-  return await persistRounds(customerId, id, rounds, extra);
+  return await persistRounds(customerId, id, finalRounds, extra);
 }
 
+async function deleteTournament(customerId, id) {
+  const { error } = await supabase
+    .from("tournaments")
+    .delete()
+    .eq("id", id)
+    .eq("customer_id", customerId);
+
+  if (error) return { ok: false, error: "No se pudo eliminar" };
+  return { ok: true };
+}
+
+async function setFinalResult(customerId, id, result) {
 async function setFinalResult(customerId, id, result) {
   const allowed = [
     "Ganador","Finalista","Top4","Top8","Top16","Top32",
@@ -300,6 +317,9 @@ if (!customerId) return res.json({ ok: false, logged_in: false, error: "Debes in
     case "update_round":
       return res.json(await updateRound(customerId, req.query.id, req.query));
 
+    case "delete_tournament":
+      return res.json(await deleteTournament(customerId, req.query.id));
+ 
     case "set_final_result":
       return res.json(await setFinalResult(customerId, req.query.id, req.query.result));
 
