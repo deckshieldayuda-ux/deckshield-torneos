@@ -136,7 +136,8 @@ function sanitizeRounds(rounds) {
 
       const w = games.filter(g => g?.result === "W").length;
       const l = games.filter(g => g?.result === "L").length;
-      if (w >= 2 || l >= 2) {
+      const tieInFirstTwo = games[0]?.result === "T" || games[1]?.result === "T";
+      if (w >= 2 || l >= 2 || tieInFirstTwo) {
         games[2] = { game: 3, result: null, turn: null, win_condition: null };
       }
       round.games = games;
