@@ -208,6 +208,92 @@ async function listTournaments(customerId) {
   return data ?? [];
 }
 
+// Clave estable para agrupar un deck (Pokémon #1 + componente #2, que puede ser
+// otro Pokémon, una carta de Ítem, o nada) sin importar el formato viejo/nuevo de p2.
+function deckKey(deck) {
+  if (!deck || deck.p1 == null) return null;
+  const p1 = deck.p1;
+  const p2 = deck.p2;
+  let p2key = "none";
+  if (typeof p2 === "number") p2key = "pokemon:" + p2;
+  else if (p2 && p2.kind === "pokemon" && p2.id != null) p2key = "pokemon:" + p2.id;
+  else if (p2 && p2.kind === "item" && p2.name) p2key = "item:" + p2.name;
+  return `${p1}|${p2key}`;
+}
+
+// Resultado de UNA ronda (W/L/T), misma lógica que computeScore pero por ronda
+// individual en vez de acumulada — se usa para el cálculo del meta de arquetipos.
+function roundOutcome(r) {
+  const special = r?.special ?? null;
+  if (special === "BYE" || special === "NO_SHOW") return "W";
+  if (special === "ID") return "T";
+  if (ENDS_TOURNAMENT.includes(special)) return "L";
+
+  const games = Array.isArray(r?.games) ? r.games : [];
+  let w = 0, l = 0, hasAny = false;
+  for (const g of games) {
+    if (!g?.result) continue;
+    hasAny = true;
+    if (g.result === "W") w++;
+    if (g.result === "L") l++;
+  }
+  if (!hasAny) return null;
+  if (w > l) return "W";
+  if (l > w) return "L";
+  return "T";
+}
+
+// Meta de arquetipos: top 8 decks por winrate, calculado sobre TODOS los torneos
+// de TODOS los usuarios (no filtra por customer_id a propósito). Requiere un
+// mínimo de partidas jugadas para no dejar que un torneo suelto distorsione el ranking.
+const META_MIN_SAMPLE = 5;
+
+async function getMetaArchetypes() {
+  const { data, error } = await supabase
+    .from("tournaments")
+    .select("my_deck, rounds");
+
+  if (error) return { ok: false, error: "No se pudo calcular el meta" };
+
+  const stats = new Map();
+
+  for (const t of (data || [])) {
+    const key = deckKey(t.my_deck);
+    if (!key) continue;
+
+    if (!stats.has(key)) {
+      stats.set(key, { p1: t.my_deck.p1, p2: t.my_deck.p2 ?? null, wins: 0, losses: 0, ties: 0 });
+    }
+    const entry = stats.get(key);
+
+    const rounds = Array.isArray(t.rounds) ? t.rounds : [];
+    for (const r of rounds) {
+      const outcome = roundOutcome(r);
+      if (outcome === "W") entry.wins++;
+      else if (outcome === "L") entry.losses++;
+      else if (outcome === "T") entry.ties++;
+    }
+  }
+
+  const archetypes = [];
+  for (const entry of stats.values()) {
+    const total = entry.wins + entry.losses + entry.ties;
+    if (total < META_MIN_SAMPLE) continue;
+    archetypes.push({
+      p1: entry.p1,
+      p2: entry.p2,
+      wins: entry.wins,
+      losses: entry.losses,
+      ties: entry.ties,
+      total,
+      winrate: entry.wins / total
+    });
+  }
+
+  archetypes.sort((a, b) => b.winrate - a.winrate);
+  return { ok: true, archetypes: archetypes.slice(0, 8) };
+}
+
 async function createTournament(customerId, q) {
   if (!q.tournament_name || !q.tournament_date) {
     return { ok: false, error: "Missing required fields" };
@@ -363,6 +449,9 @@ export default async function handler(req, res) {
 
     case "list_tournaments":
       return res.json({ ok: true, tournaments: await listTournaments(customerId) });
+
+    case "get_meta_archetypes":
+      return res.json(await getMetaArchetypes());
 
     case "create_tournament":
       return res.json(await createTournament(customerId, req.query));
