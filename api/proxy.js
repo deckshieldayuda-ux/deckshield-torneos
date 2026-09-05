@@ -57,6 +57,23 @@ function normalizeSpecial(v) {
   return undefined;
 }
 
+// El "componente #2" de un deck puede ser un segundo Pokémon o una carta de
+// Entrenador/Ítem clave (ej. Crushing Hammer en un deck de un solo Pokémon).
+// undefined = no se tocó este campo; null = se limpió a propósito.
+function buildDeckPiece(kind, id, name, image) {
+  if (kind === undefined) return undefined;
+  if (kind === "item") {
+    const cleanName = (name ?? "").toString().trim();
+    if (!cleanName) return null;
+    return { kind: "item", name: cleanName, image: (image ?? "").toString().trim() || null };
+  }
+  if (kind === "pokemon") {
+    const pid = toIntOrNull(id);
+    return pid == null ? null : { kind: "pokemon", id: pid };
+  }
+  return null;
+}
+
 // Drop y Descalificación terminan el torneo: no se pueden agregar más rondas
 // y cualquier ronda posterior que ya existiera queda eliminada.
 const ENDS_TOURNAMENT = ["DROP", "DQ"];
@@ -205,7 +222,10 @@ async function createTournament(customerId, q) {
       format: q.format ?? null,
       tournament_type: q.tournament_type ?? null,
       result: q.result ?? "SinTop",
-      my_deck: { p1: toIntOrNull(q.my_deck_p1), p2: toIntOrNull(q.my_deck_p2) },
+      my_deck: {
+        p1: toIntOrNull(q.my_deck_p1),
+        p2: buildDeckPiece(q.my_deck_p2_kind, q.my_deck_p2_id, q.my_deck_p2_name, q.my_deck_p2_image) ?? null
+      },
       rounds: [],
       score: computeScore([])
     }])
@@ -252,7 +272,8 @@ async function updateRound(customerId, id, q) {
   const r = rounds[idx];
 
   if (q.op_p1 !== undefined) r.opponent_deck.p1 = toIntOrNull(q.op_p1);
-  if (q.op_p2 !== undefined) r.opponent_deck.p2 = toIntOrNull(q.op_p2);
+  const op2 = buildDeckPiece(q.op_p2_kind, q.op_p2_id, q.op_p2_name, q.op_p2_image);
+  if (op2 !== undefined) r.opponent_deck.p2 = op2;
 
   if (q.special !== undefined) r.special = normalizeSpecial(q.special);
 
