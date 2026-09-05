@@ -151,9 +151,13 @@ function sanitizeRounds(rounds) {
         ? round.games.map(g => ({ ...g }))
         : EMPTY_GAMES();
 
-      const w = games.filter(g => g?.result === "W").length;
-      const l = games.filter(g => g?.result === "L").length;
-      const tieInFirstTwo = games[0]?.result === "T" || games[1]?.result === "T";
+      // Ojo: solo cuenta el juego 1 y 2 para decidir si el 3 aplica — si contáramos
+      // el juego 3 también, un 3° juego recién guardado que decide la ronda (ej.
+      // L-W-W) se autoinvalidaría al verse a sí mismo como si fuera de los primeros 2.
+      const firstTwo = [games[0]?.result, games[1]?.result];
+      const w = firstTwo.filter(r => r === "W").length;
+      const l = firstTwo.filter(r => r === "L").length;
+      const tieInFirstTwo = firstTwo.includes("T");
       if (w >= 2 || l >= 2 || tieInFirstTwo) {
         games[2] = { game: 3, result: null, turn: null, win_condition: null };
       }
