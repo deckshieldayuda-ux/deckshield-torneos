@@ -265,7 +265,7 @@ export default async function handler(req, res) {
   const customerId = req.query.logged_in_customer_id;
   const action = req.query.action;
 
-  if (!customerId) return res.json({ ok: true, logged_in: false });
+if (!customerId) return res.json({ ok: false, logged_in: false, error: "Debes iniciar sesión con tu cuenta de Deck Shield para registrar o ver tus torneos." });
 
   switch (action) {
     case "list_tournaments":
