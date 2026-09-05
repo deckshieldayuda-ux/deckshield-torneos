@@ -344,6 +344,21 @@ async function addRound(customerId, id) {
   return await persistRounds(customerId, id, rounds);
 }
 
+async function deleteLastRound(customerId, id) {
+  const got = await getTournamentOwned(customerId, id);
+  if (!got.ok) return got;
+
+  const rounds = got.tournament.rounds || [];
+  if (rounds.length === 0) {
+    return { ok: false, error: "No hay rondas para eliminar." };
+  }
+
+  const maxRoundNumber = Math.max(...rounds.map(r => r.round_number));
+  const finalRounds = rounds.filter(r => r.round_number !== maxRoundNumber);
+
+  return await persistRounds(customerId, id, finalRounds);
+}
+
 async function updateRound(customerId, id, q) {
   const rn = toIntOrNull(q.round_number);
   if (!rn) return { ok: false, error: "Invalid round_number" };
@@ -458,6 +473,9 @@ export default async function handler(req, res) {
 
     case "add_round":
       return res.json(await addRound(customerId, req.query.id));
+
+    case "delete_last_round":
+      return res.json(await deleteLastRound(customerId, req.query.id));
 
     case "update_round":
       return res.json(await updateRound(customerId, req.query.id, req.query));
