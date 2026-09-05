@@ -266,7 +266,6 @@ async function deleteTournament(customerId, id) {
 }
 
 async function setFinalResult(customerId, id, result) {
-async function setFinalResult(customerId, id, result) {
   const allowed = [
     "Ganador","Finalista","Top4","Top8","Top16","Top32",
     "Top64","Top128","Top256","Top512","Top1024",
