@@ -39,12 +39,12 @@ function normalizeResult(v) {
   return undefined;
 }
 
-function normalizeTurn(v) {
+function normalizeWinCondition(v) {
   if (v === undefined) return undefined;
   if (v === null || v === "" || v === "null") return null;
 
   const up = String(v).toUpperCase();
-  if (up === "FIRST" || up === "SECOND") return up;
+  if (up === "PRIZES" || up === "NO_POKEMON" || up === "DECK_OUT") return up;
   return undefined;
 }
 
@@ -53,9 +53,19 @@ function normalizeSpecial(v) {
   if (v === null || v === "" || v === "null") return null;
 
   const up = String(v).toUpperCase();
-  if (up === "ID" || up === "NO_SHOW" || up === "BYE" || up === "DROP") return up;
+  if (up === "ID" || up === "NO_SHOW" || up === "BYE" || up === "DROP" || up === "DQ") return up;
   return undefined;
 }
+
+// Drop y Descalificación terminan el torneo: no se pueden agregar más rondas
+// y cualquier ronda posterior que ya existiera queda eliminada.
+const ENDS_TOURNAMENT = ["DROP", "DQ"];
+
+const EMPTY_GAMES = () => ([
+  { game: 1, result: null, turn: null, win_condition: null },
+  { game: 2, result: null, turn: null, win_condition: null },
+  { game: 3, result: null, turn: null, win_condition: null },
+]);
 
 /* =========================
    Score + Sanitize
@@ -78,7 +88,7 @@ function computeScore(rounds) {
       ties++;
       continue;
     }
-    if (special === "DROP") {
+    if (ENDS_TOURNAMENT.includes(special)) {
       losses++;
       continue;
     }
@@ -109,12 +119,27 @@ function sanitizeRounds(rounds) {
     const round = { ...r };
     round.opponent_deck = round.opponent_deck || { p1: null, p2: null };
 
-    if (round.special === "BYE" || round.special === "NO_SHOW" || round.special === "ID" || round.special === "DROP") {
-      round.games = [
-        { game: 1, result: null, turn: null },
-        { game: 2, result: null, turn: null },
-        { game: 3, result: null, turn: null },
-      ];
+    const noOpponent = round.special === "BYE" || round.special === "NO_SHOW";
+    if (noOpponent) {
+      round.opponent_deck = { p1: null, p2: null };
+    }
+
+    const noGames = noOpponent || round.special === "ID" || ENDS_TOURNAMENT.includes(round.special);
+    if (noGames) {
+      round.games = EMPTY_GAMES();
+    } else {
+      // Al mejor de 3: si ya hay 2 juegos decididos para el mismo lado, el
+      // tercer juego no se juega y no debe contar aunque tenga algo guardado.
+      const games = Array.isArray(round.games) && round.games.length === 3
+        ? round.games.map(g => ({ ...g }))
+        : EMPTY_GAMES();
+
+      const w = games.filter(g => g?.result === "W").length;
+      const l = games.filter(g => g?.result === "L").length;
+      if (w >= 2 || l >= 2) {
+        games[2] = { game: 3, result: null, turn: null, win_condition: null };
+      }
+      round.games = games;
     }
 
     return round;
@@ -196,8 +221,8 @@ async function addRound(customerId, id) {
 
   const rounds = got.tournament.rounds || [];
 
-  if (rounds.some(r => r.special === "DROP")) {
-    return { ok: false, error: "No puedes agregar más rondas: ya registraste un abandono (Drop) en este torneo." };
+  if (rounds.some(r => ENDS_TOURNAMENT.includes(r.special))) {
+    return { ok: false, error: "No puedes agregar más rondas: el torneo ya terminó (Drop o Descalificación)." };
   }
 
   const nextNumber = rounds.length + 1;
@@ -205,11 +230,7 @@ async function addRound(customerId, id) {
   rounds.push({
     round_number: nextNumber,
     opponent_deck: { p1: null, p2: null },
-    games: [
-      { game: 1, result: null, turn: null },
-      { game: 2, result: null, turn: null },
-      { game: 3, result: null, turn: null },
-    ],
+    games: EMPTY_GAMES(),
     special: null,
   });
 
@@ -234,23 +255,36 @@ async function updateRound(customerId, id, q) {
 
   if (q.special !== undefined) r.special = normalizeSpecial(q.special);
 
+  if (!Array.isArray(r.games) || r.games.length !== 3) {
+    r.games = EMPTY_GAMES();
+  }
+
   const g1 = normalizeResult(q.g1);
   if (g1 !== undefined) r.games[0].result = g1;
+  const g1wc = normalizeWinCondition(q.g1_wc);
+  if (g1wc !== undefined) r.games[0].win_condition = g1wc;
 
   const g2 = normalizeResult(q.g2);
   if (g2 !== undefined) r.games[1].result = g2;
+  const g2wc = normalizeWinCondition(q.g2_wc);
+  if (g2wc !== undefined) r.games[1].win_condition = g2wc;
 
   const g3 = normalizeResult(q.g3);
   if (g3 !== undefined) r.games[2].result = g3;
+  const g3wc = normalizeWinCondition(q.g3_wc);
+  if (g3wc !== undefined) r.games[2].win_condition = g3wc;
 
   rounds[idx] = r;
 
   let finalRounds = rounds;
-  if (r.special === "DROP") {
+  if (ENDS_TOURNAMENT.includes(r.special)) {
     finalRounds = rounds.filter(rr => rr.round_number <= rn);
   }
 
-  const extra = (r.special === "DROP") ? { result: "Droppeado" } : {};
+  const extra = r.special === "DROP" ? { result: "Droppeado" }
+    : r.special === "DQ" ? { result: "Descalificado" }
+    : {};
+
   return await persistRounds(customerId, id, finalRounds, extra);
 }
 
@@ -269,7 +303,7 @@ async function setFinalResult(customerId, id, result) {
   const allowed = [
     "Ganador","Finalista","Top4","Top8","Top16","Top32",
     "Top64","Top128","Top256","Top512","Top1024",
-    "Droppeado","SinTop"
+    "Droppeado","Descalificado","SinTop"
   ];
 
   if (!allowed.includes(result)) {
@@ -299,11 +333,12 @@ export default async function handler(req, res) {
   const customerId = req.query.logged_in_customer_id;
   const action = req.query.action;
 
-if (!customerId) return res.json({ ok: false, logged_in: false, error: "Debes iniciar sesión con tu cuenta de Deck Shield para registrar o ver tus torneos." });
+  if (!customerId) return res.json({ ok: false, logged_in: false, error: "Debes iniciar sesión con tu cuenta de Deck Shield para registrar o ver tus torneos." });
 
   switch (action) {
     case "get_tournament":
       return res.json(await getTournamentOwned(customerId, req.query.id));
+
     case "list_tournaments":
       return res.json({ ok: true, tournaments: await listTournaments(customerId) });
 
@@ -318,7 +353,7 @@ if (!customerId) return res.json({ ok: false, logged_in: false, error: "Debes in
 
     case "delete_tournament":
       return res.json(await deleteTournament(customerId, req.query.id));
- 
+
     case "set_final_result":
       return res.json(await setFinalResult(customerId, req.query.id, req.query.result));
 
