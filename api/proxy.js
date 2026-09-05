@@ -82,7 +82,6 @@ function computeScore(rounds) {
       losses++;
       continue;
     }
-    }
 
     const games = Array.isArray(r?.games) ? r.games : [];
     let w = 0, l = 0;
