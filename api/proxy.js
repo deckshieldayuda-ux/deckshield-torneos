@@ -326,6 +326,32 @@ async function createTournament(customerId, q) {
   return { ok: true, tournament: data };
 }
 
+async function updateTournament(customerId, id, q) {
+  if (!q.tournament_name || !q.tournament_date) {
+    return { ok: false, error: "Missing required fields" };
+  }
+
+  const { data, error } = await supabase
+    .from("tournaments")
+    .update({
+      tournament_name: q.tournament_name,
+      tournament_date: q.tournament_date,
+      format: q.format ?? null,
+      tournament_type: q.tournament_type ?? null,
+      my_deck: {
+        p1: toIntOrNull(q.my_deck_p1),
+        p2: buildDeckPiece(q.my_deck_p2_kind, q.my_deck_p2_id, q.my_deck_p2_name, q.my_deck_p2_image) ?? null
+      }
+    })
+    .eq("id", id)
+    .eq("customer_id", customerId)
+    .select("*")
+    .single();
+
+  if (error) return { ok: false, error: "No se pudo actualizar" };
+  return { ok: true, tournament: data };
+}
+
 async function addRound(customerId, id) {
   const got = await getTournamentOwned(customerId, id);
   if (!got.ok) return got;
@@ -474,6 +500,9 @@ export default async function handler(req, res) {
 
     case "create_tournament":
       return res.json(await createTournament(customerId, req.query));
+
+    case "update_tournament":
+      return res.json(await updateTournament(customerId, req.query.id, req.query));
 
     case "add_round":
       return res.json(await addRound(customerId, req.query.id));
