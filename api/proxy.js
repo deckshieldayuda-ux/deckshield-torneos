@@ -258,6 +258,10 @@ async function getMetaArchetypes() {
   const stats = new Map();
 
   for (const t of (data || [])) {
+    // Solo entran al meta los decks con 2 componentes (Pokémon+Pokémon o
+    // Pokémon+carta) — un deck con un solo Pokémon suele ser data incompleta.
+    if (t.my_deck?.p2 == null) continue;
+
     const key = deckKey(t.my_deck);
     if (!key) continue;
 
