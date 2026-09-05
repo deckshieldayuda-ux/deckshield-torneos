@@ -53,7 +53,7 @@ function normalizeSpecial(v) {
   if (v === null || v === "" || v === "null") return null;
 
   const up = String(v).toUpperCase();
-  if (up === "ID" || up === "NO_SHOW" || up === "BYE") return up;
+  if (up === "ID" || up === "NO_SHOW" || up === "BYE" || up === "DROP") return up;
   return undefined;
 }
 
@@ -77,6 +77,11 @@ function computeScore(rounds) {
     if (special === "ID") {
       ties++;
       continue;
+    }
+    if (special === "DROP") {
+      losses++;
+      continue;
+    }
     }
 
     const games = Array.isArray(r?.games) ? r.games : [];
@@ -105,7 +110,7 @@ function sanitizeRounds(rounds) {
     const round = { ...r };
     round.opponent_deck = round.opponent_deck || { p1: null, p2: null };
 
-    if (round.special === "BYE" || round.special === "NO_SHOW" || round.special === "ID") {
+    if (round.special === "BYE" || round.special === "NO_SHOW" || round.special === "ID" || round.special === "DROP") {
       round.games = [
         { game: 1, result: null, turn: null },
         { game: 2, result: null, turn: null },
@@ -132,13 +137,13 @@ async function getTournamentOwned(customerId, id) {
   return { ok: true, tournament: data };
 }
 
-async function persistRounds(customerId, id, rounds) {
+async function persistRounds(customerId, id, rounds, extra = {}) {
   const clean = sanitizeRounds(rounds);
   const score = computeScore(clean);
 
   const { data, error } = await supabase
     .from("tournaments")
-    .update({ rounds: clean, score })
+    .update({ rounds: clean, score, ...extra })
     .eq("id", id)
     .eq("customer_id", customerId)
     .select("*")
@@ -191,6 +196,11 @@ async function addRound(customerId, id) {
   if (!got.ok) return got;
 
   const rounds = got.tournament.rounds || [];
+
+  if (rounds.some(r => r.special === "DROP")) {
+    return { ok: false, error: "No puedes agregar más rondas: ya registraste un abandono (Drop) en este torneo." };
+  }
+
   const nextNumber = rounds.length + 1;
 
   rounds.push({
@@ -228,8 +238,16 @@ async function updateRound(customerId, id, q) {
   const g1 = normalizeResult(q.g1);
   if (g1 !== undefined) r.games[0].result = g1;
 
+  const g2 = normalizeResult(q.g2);
+  if (g2 !== undefined) r.games[1].result = g2;
+
+  const g3 = normalizeResult(q.g3);
+  if (g3 !== undefined) r.games[2].result = g3;
+
   rounds[idx] = r;
-  return await persistRounds(customerId, id, rounds);
+
+  const extra = (r.special === "DROP") ? { result: "Droppeado" } : {};
+  return await persistRounds(customerId, id, rounds, extra);
 }
 
 async function setFinalResult(customerId, id, result) {
