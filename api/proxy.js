@@ -283,10 +283,16 @@ async function getMetaArchetypes() {
     }
   }
 
+  // Solo entran al meta arquetipos con winrate sobre 40% — bajo eso no aporta
+  // como sugerencia de deck "fuerte" y solo hace ruido en el buscador.
+  const META_MIN_WINRATE = 0.4;
+
   const archetypes = [];
   for (const entry of stats.values()) {
     const total = entry.wins + entry.losses + entry.ties;
     if (total < META_MIN_SAMPLE) continue;
+    const winrate = entry.wins / total;
+    if (winrate <= META_MIN_WINRATE) continue;
     archetypes.push({
       p1: entry.p1,
       p2: entry.p2,
@@ -294,7 +300,7 @@ async function getMetaArchetypes() {
       losses: entry.losses,
       ties: entry.ties,
       total,
-      winrate: entry.wins / total
+      winrate
     });
   }
 
@@ -342,6 +348,7 @@ async function updateTournament(customerId, id, q) {
       tournament_date: q.tournament_date,
       format: q.format ?? null,
       tournament_type: q.tournament_type ?? null,
+      result: q.result ?? "SinTop",
       my_deck: {
         p1: toIntOrNull(q.my_deck_p1),
         p2: buildDeckPiece(q.my_deck_p2_kind, q.my_deck_p2_id, q.my_deck_p2_name, q.my_deck_p2_image) ?? null
@@ -391,6 +398,43 @@ async function deleteLastRound(customerId, id) {
   const finalRounds = rounds.filter(r => r.round_number !== maxRoundNumber);
 
   return await persistRounds(customerId, id, finalRounds);
+}
+
+// Intercambia una ronda con la anterior/siguiente. Solo cambia round_number
+// (el resto del contenido viaja con la ronda), así el orden de la lista se
+// reordena sin tener que editar/eliminar rondas manualmente.
+async function moveRound(customerId, id, roundNumber, direction) {
+  const rn = toIntOrNull(roundNumber);
+  if (!rn) return { ok: false, error: "Invalid round_number" };
+  if (direction !== "up" && direction !== "down") {
+    return { ok: false, error: "Invalid direction" };
+  }
+
+  const got = await getTournamentOwned(customerId, id);
+  if (!got.ok) return got;
+
+  const rounds = got.tournament.rounds || [];
+
+  if (rounds.some(r => ENDS_TOURNAMENT.includes(r.special))) {
+    return { ok: false, error: "No puedes reordenar rondas: el torneo ya terminó (Drop o Descalificación)." };
+  }
+
+  const idx = rounds.findIndex(r => r.round_number === rn);
+  if (idx === -1) return { ok: false, error: "Round not found" };
+
+  const targetIdx = direction === "up" ? idx - 1 : idx + 1;
+  if (targetIdx < 0 || targetIdx >= rounds.length) {
+    return { ok: false, error: "No se puede mover más en esa dirección" };
+  }
+
+  const a = rounds[idx];
+  const b = rounds[targetIdx];
+  const aNum = a.round_number;
+  const bNum = b.round_number;
+  rounds[idx] = { ...b, round_number: aNum };
+  rounds[targetIdx] = { ...a, round_number: bNum };
+
+  return await persistRounds(customerId, id, rounds);
 }
 
 async function updateRound(customerId, id, q) {
@@ -513,6 +557,9 @@ export default async function handler(req, res) {
 
     case "delete_last_round":
       return res.json(await deleteLastRound(customerId, req.query.id));
+
+    case "move_round":
+      return res.json(await moveRound(customerId, req.query.id, req.query.round_number, req.query.direction));
 
     case "update_round":
       return res.json(await updateRound(customerId, req.query.id, req.query));
