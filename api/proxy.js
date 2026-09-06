@@ -536,6 +536,18 @@ async function setFinalResult(customerId, id, result) {
   return { ok: true, tournament: data };
 }
 
+// Deja un registro liviano de uso para reportería (usuarios activos, nuevos,
+// frecuencia, etc.). Nunca debe poder romper ni retrasar de forma relevante
+// la respuesta real: cualquier falla (tabla no existe, Supabase lento, lo que
+// sea) se traga acá mismo y no llega a afectar al usuario.
+async function logEvent(customerId, action) {
+  try {
+    await supabase.from("app_events").insert([{ customer_id: customerId, action }]);
+  } catch (e) {
+    // silencioso a propósito
+  }
+}
+
 /* =========================
    Main Handler
 ========================= */
@@ -548,6 +560,8 @@ export default async function handler(req, res) {
   const action = req.query.action;
 
   if (!customerId) return res.json({ ok: false, logged_in: false, error: "Debes iniciar sesión con tu cuenta de Deck Shield para registrar o ver tus torneos." });
+
+  await logEvent(customerId, action);
 
   switch (action) {
     case "get_tournament":
