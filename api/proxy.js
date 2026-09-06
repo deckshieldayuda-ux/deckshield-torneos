@@ -38,6 +38,47 @@ function verifyShopifyProxy(query) {
 }
 
 /* =========================
+   CSRF token (anti-forgery)
+========================= */
+// El App Proxy de Shopify firma CUALQUIER request que llegue a la ruta de la
+// app, sin importar qué la disparó — un <img>/formulario en un sitio externo
+// puede lograr que el navegador de una víctima logueada dispare una acción
+// real (borrar torneo, editar ronda) sin que ella haga nada en deckshield.cl.
+// Este token no reemplaza la firma de Shopify: la complementa. Se deriva
+// matemáticamente (HMAC) del customer_id + una ventana de 5 minutos, sin
+// necesitar guardar nada en la base de datos. Un atacante puede lograr que
+// el navegador de la víctima DISPARE la request que pide el token, pero
+// nunca puede LEER la respuesta (el navegador se lo impide, por ser de otro
+// sitio) — así que jamás consigue el valor real para adjuntarlo a una
+// acción falsificada.
+const CSRF_WINDOW_MS = 5 * 60 * 1000;
+
+function _csrfWindow(offset = 0) {
+  return Math.floor(Date.now() / CSRF_WINDOW_MS) - offset;
+}
+
+function computeCsrfToken(customerId, windowIdx) {
+  return crypto
+    .createHmac("sha256", process.env.SHOPIFY_APP_PROXY_SECRET)
+    .update(`csrf:${customerId}:${windowIdx}`)
+    .digest("hex");
+}
+
+function _tokensMatch(a, b) {
+  const bufA = Buffer.from(String(a), "utf8");
+  const bufB = Buffer.from(String(b), "utf8");
+  return bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);
+}
+
+function verifyCsrfToken(customerId, token) {
+  if (!token) return false;
+  // Acepta la ventana actual y la anterior (holgura de hasta 5-10 min desde
+  // que el frontend pidió el token, para no romper una sesión larga).
+  return _tokensMatch(token, computeCsrfToken(customerId, _csrfWindow(0)))
+      || _tokensMatch(token, computeCsrfToken(customerId, _csrfWindow(1)));
+}
+
+/* =========================
    Helpers
 ========================= */
 // Texto libre (nombre de torneo, nombre de carta) llega sin validar desde
@@ -616,6 +657,12 @@ export default async function handler(req, res) {
 
   if (!customerId) return res.json({ ok: false, logged_in: false, error: "Debes iniciar sesión con tu cuenta de Deck Shield para registrar o ver tus torneos." });
 
+  // Las mismas acciones que cambian datos (RATE_LIMITED_ACTIONS) exigen el
+  // token anti-CSRF — ver verifyCsrfToken() más arriba para el motivo.
+  if (RATE_LIMITED_ACTIONS.has(action) && !verifyCsrfToken(customerId, req.query.csrf)) {
+    return res.status(403).json({ ok: false, error: "Sesión no verificada — recarga la página e inténtalo de nuevo." });
+  }
+
   if (RATE_LIMITED_ACTIONS.has(action) && await isRateLimited(customerId)) {
     return res.status(429).json({ ok: false, error: "Demasiadas acciones seguidas — espera un minuto e inténtalo de nuevo." });
   }
@@ -623,6 +670,9 @@ export default async function handler(req, res) {
   await logEvent(customerId, action);
 
   switch (action) {
+    case "get_csrf_token":
+      return res.json({ ok: true, csrf: computeCsrfToken(customerId, _csrfWindow(0)) });
+
     case "get_tournament":
       return res.json(await getTournamentOwned(customerId, req.query.id));
 
