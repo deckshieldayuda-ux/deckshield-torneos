@@ -4,6 +4,12 @@ import { supabase } from "./_lib/supabase.js";
 /* =========================
    Shopify App Proxy Verify
 ========================= */
+// Una request firmada capturada una vez (ej. en el historial del navegador,
+// o en un log de proxy) no debe poder reenviarse indefinidamente — Shopify
+// incluye "timestamp" (epoch segundos) en todo request de App Proxy, así
+// que se rechaza cualquiera con más de 90s de antigüedad.
+const MAX_TIMESTAMP_SKEW_SECONDS = 90;
+
 function verifyShopifyProxy(query) {
   const { signature, ...rest } = query;
   if (!signature) return false;
@@ -18,12 +24,33 @@ function verifyShopifyProxy(query) {
     .update(message)
     .digest("hex");
 
-  return generatedSignature === signature;
+  const expected = Buffer.from(generatedSignature, "utf8");
+  const received = Buffer.from(String(signature), "utf8");
+  if (expected.length !== received.length) return false;
+  if (!crypto.timingSafeEqual(expected, received)) return false;
+
+  const ts = Number(rest.timestamp);
+  if (!Number.isFinite(ts)) return false;
+  const skew = Math.abs(Math.floor(Date.now() / 1000) - ts);
+  if (skew > MAX_TIMESTAMP_SKEW_SECONDS) return false;
+
+  return true;
 }
 
 /* =========================
    Helpers
 ========================= */
+// Texto libre (nombre de torneo, nombre de carta) llega sin validar desde
+// el cliente — el buscador del frontend restringe qué se puede ELEGIR, pero
+// nada impedía llamar la API directo con cualquier string. Se recorta el
+// largo y se descartan '<'/'>' para que no pueda guardarse markup/script
+// que después se muestre sin escapar en alguna pantalla (ej. Meta de
+// Arquetipos, que junta datos de todos los usuarios).
+function sanitizeText(v, maxLen) {
+  const s = (v ?? "").toString().trim().replace(/[<>]/g, "");
+  return s.slice(0, maxLen) || null;
+}
+
 function toIntOrNull(v) {
   if (v === undefined || v === null || v === "") return null;
   const n = Number(v);
@@ -63,9 +90,9 @@ function normalizeSpecial(v) {
 function buildDeckPiece(kind, id, name, image) {
   if (kind === undefined) return undefined;
   if (kind === "item") {
-    const cleanName = (name ?? "").toString().trim();
+    const cleanName = sanitizeText(name, 60);
     if (!cleanName) return null;
-    return { kind: "item", name: cleanName, image: (image ?? "").toString().trim() || null };
+    return { kind: "item", name: cleanName, image: sanitizeText(image, 500) };
   }
   if (kind === "pokemon") {
     const pid = toIntOrNull(id);
@@ -330,7 +357,7 @@ async function createTournament(customerId, q) {
     .from("tournaments")
     .insert([{
       customer_id: customerId,
-      tournament_name: q.tournament_name,
+      tournament_name: sanitizeText(q.tournament_name, 80),
       tournament_date: q.tournament_date,
       format: q.format ?? null,
       tournament_type: q.tournament_type ?? null,
@@ -357,7 +384,7 @@ async function updateTournament(customerId, id, q) {
   const { data, error } = await supabase
     .from("tournaments")
     .update({
-      tournament_name: q.tournament_name,
+      tournament_name: sanitizeText(q.tournament_name, 80),
       tournament_date: q.tournament_date,
       format: q.format ?? null,
       tournament_type: q.tournament_type ?? null,
