@@ -252,6 +252,24 @@ function roundOutcome(r) {
 // mínimo de partidas jugadas para no dejar que un torneo suelto distorsione el ranking.
 const META_MIN_SAMPLE = 5;
 
+// Suma un resultado a las estadísticas de un deck (mío o del rival). Solo
+// entran decks con 2 componentes (Pokémon+Pokémon o Pokémon+carta) — un deck
+// con un solo Pokémon suele ser data incompleta.
+function addArchetypeResult(stats, deck, outcome) {
+  if (!outcome || !deck || deck.p1 == null || deck.p2 == null) return;
+
+  const key = deckKey(deck);
+  if (!key) return;
+
+  if (!stats.has(key)) {
+    stats.set(key, { p1: deck.p1, p2: deck.p2 ?? null, wins: 0, losses: 0, ties: 0 });
+  }
+  const entry = stats.get(key);
+  if (outcome === "W") entry.wins++;
+  else if (outcome === "L") entry.losses++;
+  else if (outcome === "T") entry.ties++;
+}
+
 async function getMetaArchetypes() {
   const { data, error } = await supabase
     .from("tournaments")
@@ -262,24 +280,19 @@ async function getMetaArchetypes() {
   const stats = new Map();
 
   for (const t of (data || [])) {
-    // Solo entran al meta los decks con 2 componentes (Pokémon+Pokémon o
-    // Pokémon+carta) — un deck con un solo Pokémon suele ser data incompleta.
-    if (t.my_deck?.p2 == null) continue;
-
-    const key = deckKey(t.my_deck);
-    if (!key) continue;
-
-    if (!stats.has(key)) {
-      stats.set(key, { p1: t.my_deck.p1, p2: t.my_deck.p2 ?? null, wins: 0, losses: 0, ties: 0 });
-    }
-    const entry = stats.get(key);
-
     const rounds = Array.isArray(t.rounds) ? t.rounds : [];
     for (const r of rounds) {
       const outcome = roundOutcome(r);
-      if (outcome === "W") entry.wins++;
-      else if (outcome === "L") entry.losses++;
-      else if (outcome === "T") entry.ties++;
+      if (!outcome) continue;
+
+      // Mi deck se acredita con el resultado tal cual lo viví.
+      addArchetypeResult(stats, t.my_deck, outcome);
+
+      // El deck del rival se acredita con el resultado inverso — así un mirror
+      // match (mismo deck de ambos lados) no infla el winrate del arquetipo:
+      // mi victoria es necesariamente una derrota para ese mismo mazo del otro lado.
+      const opponentOutcome = outcome === "W" ? "L" : outcome === "L" ? "W" : "T";
+      addArchetypeResult(stats, r.opponent_deck, opponentOutcome);
     }
   }
 
