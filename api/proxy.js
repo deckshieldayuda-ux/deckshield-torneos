@@ -575,6 +575,34 @@ async function logEvent(customerId, action) {
   }
 }
 
+// Sin esto, una sola cuenta (gratis y automática de crear) podía llamar
+// create_tournament sin límite — suficiente para inflar/ensuciar el Meta de
+// Arquetipos (que se calcula sobre TODOS los usuarios) o simplemente saturar
+// la base. Se reusa app_events (ya se registra en cada acción) como bitácora
+// para contar cuántas acciones de escritura hizo ese cliente en la última
+// ventana, sin necesitar infraestructura nueva (Redis/KV).
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX_ACTIONS = 20;
+const RATE_LIMITED_ACTIONS = new Set([
+  "create_tournament", "update_tournament", "add_round", "delete_last_round",
+  "move_round", "update_round", "delete_tournament", "set_final_result",
+]);
+
+async function isRateLimited(customerId) {
+  try {
+    const since = new Date(Date.now() - RATE_LIMIT_WINDOW_MS).toISOString();
+    const { count, error } = await supabase
+      .from("app_events")
+      .select("id", { count: "exact", head: true })
+      .eq("customer_id", customerId)
+      .gte("created_at", since);
+    if (error) return false; // si no se puede consultar, no bloqueamos por las dudas
+    return (count ?? 0) >= RATE_LIMIT_MAX_ACTIONS;
+  } catch (e) {
+    return false;
+  }
+}
+
 /* =========================
    Main Handler
 ========================= */
@@ -587,6 +615,10 @@ export default async function handler(req, res) {
   const action = req.query.action;
 
   if (!customerId) return res.json({ ok: false, logged_in: false, error: "Debes iniciar sesión con tu cuenta de Deck Shield para registrar o ver tus torneos." });
+
+  if (RATE_LIMITED_ACTIONS.has(action) && await isRateLimited(customerId)) {
+    return res.status(429).json({ ok: false, error: "Demasiadas acciones seguidas — espera un minuto e inténtalo de nuevo." });
+  }
 
   await logEvent(customerId, action);
 
