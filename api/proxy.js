@@ -270,15 +270,23 @@ function addArchetypeResult(stats, deck, outcome) {
   else if (outcome === "T") entry.ties++;
 }
 
-async function getMetaArchetypes() {
-  const { data, error } = await supabase
-    .from("tournaments")
-    .select("my_deck, rounds");
+// Solo entran al meta arquetipos con winrate sobre 40% — bajo eso no aporta
+// como sugerencia de deck "fuerte" y solo hace ruido en el buscador/tier list.
+const META_MIN_WINRATE = 0.4;
 
-  if (error) return { ok: false, error: "No se pudo calcular el meta" };
+// rangeDays=null trae TODO el histórico (comportamiento original). Filtra
+// por tournament_date (fecha en que se jugó, no en que se registró) porque
+// la gente suele registrar en lote días después.
+async function buildArchetypeStats(rangeDays) {
+  let query = supabase.from("tournaments").select("my_deck, rounds, tournament_date");
+  if (rangeDays != null) {
+    const cutoff = new Date(Date.now() - rangeDays * 86400000).toISOString().slice(0, 10);
+    query = query.gte("tournament_date", cutoff);
+  }
+  const { data, error } = await query;
+  if (error) return null;
 
   const stats = new Map();
-
   for (const t of (data || [])) {
     const rounds = Array.isArray(t.rounds) ? t.rounds : [];
     for (const r of rounds) {
@@ -295,11 +303,10 @@ async function getMetaArchetypes() {
       addArchetypeResult(stats, r.opponent_deck, opponentOutcome);
     }
   }
+  return stats;
+}
 
-  // Solo entran al meta arquetipos con winrate sobre 40% — bajo eso no aporta
-  // como sugerencia de deck "fuerte" y solo hace ruido en el buscador.
-  const META_MIN_WINRATE = 0.4;
-
+function archetypesFromStats(stats, limit) {
   const archetypes = [];
   for (const entry of stats.values()) {
     const total = entry.wins + entry.losses + entry.ties;
@@ -320,9 +327,36 @@ async function getMetaArchetypes() {
       winrate
     });
   }
-
   archetypes.sort((a, b) => b.winrate - a.winrate);
-  return { ok: true, archetypes: archetypes.slice(0, 8) };
+  return archetypes.slice(0, limit);
+}
+
+async function getMetaArchetypes() {
+  const stats = await buildArchetypeStats(null);
+  if (!stats) return { ok: false, error: "No se pudo calcular el meta" };
+  return { ok: true, archetypes: archetypesFromStats(stats, 8) };
+}
+
+// Tier list "Meta Local": mismos datos, agrupados por banda de winrate en
+// vez de un ranking plano, con filtro de ventana de tiempo opcional.
+// Cortes calibrados contra convención real de tier lists competitivos de
+// TCG (S ~60%+, A ~52-59%, B ~45-51%, C ~40-44%) — no son un invento propio.
+function tierFor(winrate) {
+  const pct = winrate * 100;
+  if (pct >= 60) return "S";
+  if (pct >= 52) return "A";
+  if (pct >= 45) return "B";
+  return "C";
+}
+
+const META_RANGE_DAYS = { today: 1, "3d": 3, "7d": 7, "30d": 30 };
+
+async function getMetaTierList(range) {
+  const rangeDays = META_RANGE_DAYS[range] ?? null;
+  const stats = await buildArchetypeStats(rangeDays);
+  if (!stats) return { ok: false, error: "No se pudo calcular el meta" };
+  const archetypes = archetypesFromStats(stats, 30).map(a => ({ ...a, tier: tierFor(a.winrate) }));
+  return { ok: true, archetypes, range: range || "all" };
 }
 
 async function createTournament(customerId, q) {
@@ -771,6 +805,9 @@ export default async function handler(req, res) {
 
     case "get_meta_archetypes":
       return res.json(await getMetaArchetypes());
+
+    case "get_meta_tier_list":
+      return res.json(await getMetaTierList(req.query.range));
 
     case "create_tournament":
       return res.json(await createTournament(customerId, req.query));
