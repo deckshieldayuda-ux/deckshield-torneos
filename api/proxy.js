@@ -304,7 +304,11 @@ async function getMetaArchetypes() {
   for (const entry of stats.values()) {
     const total = entry.wins + entry.losses + entry.ties;
     if (total < META_MIN_SAMPLE) continue;
-    const winrate = entry.wins / total;
+    // Winrate = victorias / (victorias + derrotas) — los empates quedan
+    // fuera del cálculo (no cuentan ni a favor ni en contra), a diferencia
+    // de `total` (que sí los incluye, como tamaño de muestra real).
+    const decisivas = entry.wins + entry.losses;
+    const winrate = decisivas > 0 ? entry.wins / decisivas : 0;
     if (winrate <= META_MIN_WINRATE) continue;
     archetypes.push({
       p1: entry.p1,
@@ -499,7 +503,21 @@ async function updateRound(customerId, id, q) {
     : r.special === "DQ" ? { result: "Descalificado" }
     : {};
 
-  return await persistRounds(customerId, id, finalRounds, extra);
+  const saved = await persistRounds(customerId, id, finalRounds, extra);
+  if (!saved.ok) return saved;
+
+  let unlocked = [];
+  const outcome = roundOutcome(r);
+  if (outcome) {
+    unlocked = unlocked.concat(await checkDeckAchievements(customerId, saved.tournament.my_deck, outcome, r.opponent_deck));
+  }
+  // Drop/DQ fija un resultado final acá mismo (no pasa por setFinalResult),
+  // así que también hay que revisar logros de volumen/resultado en ese caso.
+  if (extra.result) {
+    unlocked = unlocked.concat(await checkResultAchievements(customerId, saved.tournament));
+  }
+  saved.unlocked = unlocked;
+  return saved;
 }
 
 async function deleteTournament(customerId, id) {
@@ -533,7 +551,188 @@ async function setFinalResult(customerId, id, result) {
     .single();
 
   if (error) return { ok: false, error: "Failed to update result" };
-  return { ok: true, tournament: data };
+  const unlocked = await checkResultAchievements(customerId, data);
+  return { ok: true, tournament: data, unlocked };
+}
+
+/* =========================
+   Logros / Hitos
+   ---------------------------------------------------------------------
+   Se disparan en dos momentos nada más:
+   - setFinalResult (y el cierre automático por Drop/DQ dentro de
+     updateRound, que también fija un resultado final): volumen de
+     torneos CON resultado guardado + logros de resultado. Se eligió
+     "resultado guardado" en vez de "torneo creado" para no contar
+     torneos abandonados a medio registrar.
+   - updateRound, cuando la ronda recién guardada ya tiene un resultado
+     determinable (W/L/T): maestría de mazo.
+
+   user_achievements tiene una restricción UNIQUE(customer_id,
+   achievement_key) — intentarDesbloquear() aprovecha eso: intenta
+   insertar y, si Postgres rechaza por duplicado, simplemente no se
+   vuelve a mostrar. No hay que llevar el estado a mano en ningún lado.
+========================= */
+const VOLUME_THRESHOLDS = [1, 3, 5, 10, 25, 50];
+const VOLUME_MESSAGES = {
+  3: { icon: "📈", color: "#173F32", title: "3 torneos registrados",
+    msg: "¿Sabías que puedes ver qué se está jugando ahora mismo en el meta y con qué winrate? Está en \"Arquetipos Meta\"." },
+  5: { icon: "📊", color: "#173F32", title: "5 torneos registrados",
+    msg: "5 torneos ya es data real. Revisa cuál es tu mejor mazo hasta ahora en \"Mis Estadísticas\"." },
+  10: { icon: "📊", color: "#0E4C52", title: "10 torneos registrados",
+    msg: "Ya tienes una temporada completa de datos tuyos. Mira cómo se compara tu winrate con el meta general en \"Arquetipos Meta\"." },
+  25: { icon: "🗂️", color: "#3E4F5C", title: "25 torneos registrados",
+    msg: "Esa es una historia completa de tu juego — de tu primer torneo a hoy, todo queda registrado." },
+  50: { icon: "🙌", color: "#141210", title: "50 torneos registrados",
+    msg: "Gracias por construir esto con nosotros desde el principio — tu historial ya es parte de la comunidad de Deck Shield." },
+};
+
+const RESULT_RANK = {
+  Ganador: 1, Finalista: 2, Top4: 3, Top8: 4, Top16: 5, Top32: 6,
+  Top64: 7, Top128: 8, Top256: 9, Top512: 10, Top1024: 11,
+};
+const BIG_EVENTS = ["Regional", "Internacional", "Mundial"];
+
+async function intentarDesbloquear(customerId, achievementKey) {
+  const { error } = await supabase
+    .from("user_achievements")
+    .insert([{ customer_id: customerId, achievement_key: achievementKey }]);
+  return !error;
+}
+
+async function checkResultAchievements(customerId, tournament) {
+  const unlocked = [];
+
+  const { data } = await supabase
+    .from("tournaments")
+    .select("tournament_type, result")
+    .eq("customer_id", customerId)
+    .neq("result", "SinTop");
+  const torneos = data || [];
+  const total = torneos.length;
+
+  if (VOLUME_THRESHOLDS.includes(total)) {
+    if (total === 1) {
+      const { data: compra } = await supabase
+        .from("customer_purchase_info")
+        .select("total_orders")
+        .eq("customer_id", customerId)
+        .maybeSingle();
+      const esComprador = (compra?.total_orders ?? 0) > 0;
+      if (await intentarDesbloquear(customerId, "vol_1")) {
+        unlocked.push(esComprador
+          ? { key: "vol_1", icon: "🎉", color: "#182338", title: "¡Primer torneo registrado!",
+              msg: "Gracias por confiar en Deck Shield tanto en tus compras como ahora en tu juego — no solo te protegemos las cartas, también te acompañamos en el camino competitivo." }
+          : { key: "vol_1", icon: "🎉", color: "#182338", title: "¡Primer torneo registrado!",
+              msg: "Desde ahora Deck Shield lleva la cuenta por ti — mira tu resultado en \"Mis Estadísticas\"." });
+      }
+    } else {
+      const m = VOLUME_MESSAGES[total];
+      if (m && await intentarDesbloquear(customerId, `vol_${total}`)) {
+        unlocked.push({ key: `vol_${total}`, ...m });
+      }
+    }
+  }
+
+  const tipo = tournament.tournament_type;
+  const resultado = tournament.result;
+
+  if (resultado === "Ganador") {
+    if (tipo === "Challenge") {
+      const veces = torneos.filter(t => t.tournament_type === "Challenge" && t.result === "Ganador").length;
+      if (veces === 1 && await intentarDesbloquear(customerId, "logro_primer_challenge")) {
+        unlocked.push({ key: "logro_primer_challenge", icon: "🏆", color: "#182338", title: "Challenge ganado",
+          msg: "Quedó registrada tu primera victoria en un Challenge dentro de Deck Shield." });
+      }
+    } else if (tipo === "Cup") {
+      const veces = torneos.filter(t => t.tournament_type === "Cup" && t.result === "Ganador").length;
+      if (veces === 1 && await intentarDesbloquear(customerId, "logro_primer_cup")) {
+        unlocked.push({ key: "logro_primer_cup", icon: "🏆", color: "#5C2430", title: "Cup ganado",
+          msg: "Quedó registrada tu primera victoria en un Cup dentro de Deck Shield." });
+      }
+    } else if (!BIG_EVENTS.includes(tipo)) {
+      // Genérico solo para Liga/Testeo/sin tipo — Regional/Internacional/Mundial
+      // ya quedan cubiertos abajo con un mensaje más específico.
+      const veces = torneos.filter(t => t.result === "Ganador").length;
+      if (veces === 1 && await intentarDesbloquear(customerId, "logro_primera_victoria")) {
+        unlocked.push({ key: "logro_primera_victoria", icon: "🏆", color: "#182338", title: "¡Torneo ganado!",
+          msg: "Registraste tu primer torneo ganado en Deck Shield. Sea tu primer título o el número 50, desde ahora queda guardado acá." });
+      }
+    }
+  }
+
+  if (BIG_EVENTS.includes(tipo)) {
+    const vecesEsteTipo = torneos.filter(t => t.tournament_type === tipo).length;
+    if (vecesEsteTipo === 1 && await intentarDesbloquear(customerId, `logro_primer_${tipo.toLowerCase()}`)) {
+      unlocked.push({ key: `logro_primer_${tipo.toLowerCase()}`, icon: "🚩", color: "#173F32", title: "Nuevo nivel",
+        msg: `Registraste tu primer ${tipo} en Deck Shield. Quedará guardado en tu historial acá desde ahora.` });
+    }
+
+    const rank = RESULT_RANK[resultado];
+    if (rank != null && rank <= 4) {
+      const vecesTopGrande = torneos.filter(t =>
+        BIG_EVENTS.includes(t.tournament_type) && RESULT_RANK[t.result] != null && RESULT_RANK[t.result] <= 4
+      ).length;
+      if (vecesTopGrande === 1 && await intentarDesbloquear(customerId, "logro_top_grande")) {
+        const etiqueta = resultado === "Ganador" ? "Ganaste" : `Top ${resultado.replace("Top", "")} en`;
+        unlocked.push({ key: "logro_top_grande", icon: "⭐", color: "#141210", title: "Gran resultado",
+          msg: `${etiqueta} un ${tipo}, registrado en Deck Shield — un resultado que vale la pena tener guardado.` });
+      }
+    }
+  }
+
+  return unlocked;
+}
+
+async function checkDeckAchievements(customerId, myDeck, thisRoundOutcome, thisRoundOpponentDeck) {
+  const unlocked = [];
+  const key = deckKey(myDeck);
+  if (!key) return unlocked;
+
+  const { data } = await supabase
+    .from("tournaments")
+    .select("my_deck, rounds")
+    .eq("customer_id", customerId);
+
+  let wins = 0, losses = 0, ties = 0;
+  for (const t of (data || [])) {
+    if (deckKey(t.my_deck) !== key) continue;
+    for (const r of (t.rounds || [])) {
+      const outcome = roundOutcome(r);
+      if (outcome === "W") wins++;
+      else if (outcome === "L") losses++;
+      else if (outcome === "T") ties++;
+    }
+  }
+  const total = wins + losses + ties;
+
+  if (total >= 3 && await intentarDesbloquear(customerId, `mazo_muestra_${key}`)) {
+    unlocked.push({ key: `mazo_muestra_${key}`, icon: "🧩", color: "#3E4F5C", title: "Mazo con muestra sólida",
+      msg: "Ya tienes 3 partidas registradas con {mazo}. Suficiente para empezar a ver un patrón real.", deck: myDeck });
+  }
+  if (total >= 10 && await intentarDesbloquear(customerId, `mazo_consolidado_${key}`)) {
+    unlocked.push({ key: `mazo_consolidado_${key}`, icon: "🧩", color: "#173F32", title: "Mazo consolidado",
+      msg: "10 partidas con {mazo} — ya no es una racha, es tu mazo de verdad. ¿Qué tan bien te ha ido? Revísalo en tus estadísticas.", deck: myDeck });
+  }
+  const decisivas = wins + losses;
+  const winrate = decisivas > 0 ? wins / decisivas : 0;
+  if (decisivas >= 5 && winrate >= 0.6 && await intentarDesbloquear(customerId, `mazo_fuerte_${key}`)) {
+    unlocked.push({ key: `mazo_fuerte_${key}`, icon: "💪", color: "#0E4C52", title: "Mazo fuerte",
+      msg: `{mazo} va con ${Math.round(winrate * 100)}% en ${total} partidas — tienes un mazo fuerte entre manos.`, deck: myDeck });
+  }
+
+  if (thisRoundOutcome === "W" && thisRoundOpponentDeck) {
+    const meta = await getMetaArchetypes();
+    const top = meta.ok ? meta.archetypes[0] : null;
+    if (top && deckKey(thisRoundOpponentDeck) === deckKey({ p1: top.p1, p2: top.p2 })) {
+      if (await intentarDesbloquear(customerId, "mazo_vencio_meta1")) {
+        unlocked.push({ key: "mazo_vencio_meta1", icon: "🎯", color: "#5C2430", title: "¡Gran resultado!",
+          msg: "Le ganaste al mazo #1 del meta actual ({mazo}). Buen resultado contra lo que más se está jugando.",
+          deck: { p1: top.p1, p2: top.p2 } });
+      }
+    }
+  }
+
+  return unlocked;
 }
 
 // Deja un registro liviano de uso para reportería (usuarios activos, nuevos,
