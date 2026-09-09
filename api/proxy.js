@@ -553,17 +553,16 @@ async function updateRound(customerId, id, q) {
   const saved = await persistRounds(customerId, id, finalRounds, extra);
   if (!saved.ok) return saved;
 
-  let unlocked = [];
+  // Independientes entre sí (mazo vs. volumen/resultado) — cuando Drop/DQ
+  // dispara los dos a la vez, van en paralelo en vez de uno tras otro.
   const outcome = roundOutcome(r);
-  if (outcome) {
-    unlocked = unlocked.concat(await checkDeckAchievements(customerId, saved.tournament.my_deck, outcome, r.opponent_deck));
-  }
-  // Drop/DQ fija un resultado final acá mismo (no pasa por setFinalResult),
-  // así que también hay que revisar logros de volumen/resultado en ese caso.
-  if (extra.result) {
-    unlocked = unlocked.concat(await checkResultAchievements(customerId, saved.tournament));
-  }
-  saved.unlocked = unlocked;
+  const [deckUnlocked, resultUnlocked] = await Promise.all([
+    outcome ? checkDeckAchievements(customerId, saved.tournament.my_deck, outcome, r.opponent_deck) : Promise.resolve([]),
+    // Drop/DQ fija un resultado final acá mismo (no pasa por setFinalResult),
+    // así que también hay que revisar logros de volumen/resultado en ese caso.
+    extra.result ? checkResultAchievements(customerId, saved.tournament) : Promise.resolve([]),
+  ]);
+  saved.unlocked = [...deckUnlocked, ...resultUnlocked];
   return saved;
 }
 
@@ -735,10 +734,15 @@ async function checkDeckAchievements(customerId, myDeck, thisRoundOutcome, thisR
   const key = deckKey(myDeck);
   if (!key) return unlocked;
 
-  const { data } = await supabase
-    .from("tournaments")
-    .select("my_deck, rounds")
-    .eq("customer_id", customerId);
+  // Las dos consultas de acá abajo no dependen una de la otra — van en
+  // paralelo (Promise.all) en vez de una detrás de otra, para no sumar
+  // dos viajes de ida y vuelta a Supabase donde con uno alcanza.
+  const wantsMetaCheck = thisRoundOutcome === "W" && !!thisRoundOpponentDeck;
+  const [deckRes, meta] = await Promise.all([
+    supabase.from("tournaments").select("my_deck, rounds").eq("customer_id", customerId),
+    wantsMetaCheck ? getMetaArchetypes() : Promise.resolve(null),
+  ]);
+  const data = deckRes.data;
 
   let wins = 0, losses = 0, ties = 0;
   for (const t of (data || [])) {
@@ -767,9 +771,8 @@ async function checkDeckAchievements(customerId, myDeck, thisRoundOutcome, thisR
       msg: `{mazo} va con ${Math.round(winrate * 100)}% en ${total} partidas — tienes un mazo fuerte entre manos.`, deck: myDeck });
   }
 
-  if (thisRoundOutcome === "W" && thisRoundOpponentDeck) {
-    const meta = await getMetaArchetypes();
-    const top = meta.ok ? meta.archetypes[0] : null;
+  if (wantsMetaCheck) {
+    const top = meta?.ok ? meta.archetypes[0] : null;
     if (top && deckKey(thisRoundOpponentDeck) === deckKey({ p1: top.p1, p2: top.p2 })) {
       if (await intentarDesbloquear(customerId, "mazo_vencio_meta1")) {
         unlocked.push({ key: "mazo_vencio_meta1", icon: "🎯", color: "#5C2430", title: "¡Gran resultado!",
@@ -794,6 +797,56 @@ async function logEvent(customerId, action) {
   }
 }
 
+// Ejecuta la acción real pedida — separado del handler para poder correrlo
+// en paralelo con logEvent() en vez de esperar a que termine primero.
+async function runAction(customerId, action, q) {
+  switch (action) {
+    case "get_tournament":
+      return await getTournamentOwned(customerId, q.id);
+
+    case "list_tournaments":
+      return { ok: true, tournaments: await listTournaments(customerId) };
+
+    case "get_meta_archetypes":
+      return await getMetaArchetypes();
+
+    case "get_meta_tier_list":
+      return await getMetaTierList(q.range);
+
+    case "create_tournament":
+      return await createTournament(customerId, q);
+
+    case "update_tournament":
+      return await updateTournament(customerId, q.id, q);
+
+    case "add_round":
+      return await addRound(customerId, q.id);
+
+    case "delete_last_round":
+      return await deleteLastRound(customerId, q.id);
+
+    case "move_round":
+      return await moveRound(customerId, q.id, q.round_number, q.direction);
+
+    case "update_round":
+      return await updateRound(customerId, q.id, q);
+
+    case "delete_tournament":
+      return await deleteTournament(customerId, q.id);
+
+    case "set_final_result":
+      return await setFinalResult(customerId, q.id, q.result);
+
+    case "share_image":
+      // La imagen se genera y descarga 100% en el navegador (Canvas), acá
+      // solo interesa que logEvent() haya quedado registrado.
+      return { ok: true };
+
+    default:
+      return { ok: false, error: "Unknown action" };
+  }
+}
+
 /* =========================
    Main Handler
 ========================= */
@@ -807,51 +860,12 @@ export default async function handler(req, res) {
 
   if (!customerId) return res.json({ ok: false, logged_in: false, error: "Debes iniciar sesión con tu cuenta de Deck Shield para registrar o ver tus torneos." });
 
-  await logEvent(customerId, action);
-
-  switch (action) {
-    case "get_tournament":
-      return res.json(await getTournamentOwned(customerId, req.query.id));
-
-    case "list_tournaments":
-      return res.json({ ok: true, tournaments: await listTournaments(customerId) });
-
-    case "get_meta_archetypes":
-      return res.json(await getMetaArchetypes());
-
-    case "get_meta_tier_list":
-      return res.json(await getMetaTierList(req.query.range));
-
-    case "create_tournament":
-      return res.json(await createTournament(customerId, req.query));
-
-    case "update_tournament":
-      return res.json(await updateTournament(customerId, req.query.id, req.query));
-
-    case "add_round":
-      return res.json(await addRound(customerId, req.query.id));
-
-    case "delete_last_round":
-      return res.json(await deleteLastRound(customerId, req.query.id));
-
-    case "move_round":
-      return res.json(await moveRound(customerId, req.query.id, req.query.round_number, req.query.direction));
-
-    case "update_round":
-      return res.json(await updateRound(customerId, req.query.id, req.query));
-
-    case "delete_tournament":
-      return res.json(await deleteTournament(customerId, req.query.id));
-
-    case "set_final_result":
-      return res.json(await setFinalResult(customerId, req.query.id, req.query.result));
-
-    case "share_image":
-      // La imagen se genera y descarga 100% en el navegador (Canvas), acá
-      // solo interesa que logEvent() de arriba haya quedado registrado.
-      return res.json({ ok: true });
-
-    default:
-      return res.json({ ok: false, error: "Unknown action" });
-  }
+  // logEvent() y la acción real no dependen una de la otra — antes se
+  // esperaba el registro de uso ANTES de arrancar cualquier otra cosa, en
+  // las 13 acciones de la app. Ahora van en paralelo.
+  const [, result] = await Promise.all([
+    logEvent(customerId, action),
+    runAction(customerId, action, req.query),
+  ]);
+  return res.json(result);
 }
