@@ -57,6 +57,16 @@ function normalizeSpecial(v) {
   return undefined;
 }
 
+// Coin flip — dato opcional, por eso admite volver a null (a diferencia de
+// special/result, acá "no elegido" es un estado normal, no un error).
+function normalizeWentFirst(v) {
+  if (v === undefined) return undefined;
+  if (v === null || v === "" || v === "null") return null;
+  if (v === "true" || v === "1") return true;
+  if (v === "false" || v === "0") return false;
+  return undefined;
+}
+
 // El "componente #2" de un deck puede ser un segundo Pokémon o una carta de
 // Entrenador/Ítem clave (ej. Crushing Hammer en un deck de un solo Pokémon).
 // undefined = no se tocó este campo; null = se limpió a propósito.
@@ -506,6 +516,9 @@ async function updateRound(customerId, id, q) {
   if (op2 !== undefined) r.opponent_deck.p2 = op2;
 
   if (q.special !== undefined) r.special = normalizeSpecial(q.special);
+
+  const wentFirst = normalizeWentFirst(q.went_first);
+  if (wentFirst !== undefined) r.went_first = wentFirst;
 
   if (!Array.isArray(r.games) || r.games.length !== 3) {
     r.games = EMPTY_GAMES();
