@@ -620,13 +620,13 @@ async function setFinalResult(customerId, id, result) {
 ========================= */
 const VOLUME_THRESHOLDS = [1, 3, 5, 10, 25, 50];
 const VOLUME_MESSAGES = {
-  3: { icon: "📈", color: "#173F32", title: "3 torneos registrados",
+  3: { icon: "📈", color: "#3A2F1F", title: "3 torneos registrados",
     msg: "¿Sabías que puedes ver qué se está jugando ahora mismo en el meta y con qué winrate? Está en \"Arquetipos Meta\"." },
-  5: { icon: "📊", color: "#173F32", title: "5 torneos registrados",
+  5: { icon: "📊", color: "#332A1C", title: "5 torneos registrados",
     msg: "5 torneos ya es data real. Revisa cuál es tu mejor mazo hasta ahora en \"Mis Estadísticas\"." },
-  10: { icon: "📊", color: "#0E4C52", title: "10 torneos registrados",
+  10: { icon: "📊", color: "#2C2318", title: "10 torneos registrados",
     msg: "Ya tienes una temporada completa de datos tuyos. Mira cómo se compara tu winrate con el meta general en \"Arquetipos Meta\"." },
-  25: { icon: "🗂️", color: "#3E4F5C", title: "25 torneos registrados",
+  25: { icon: "🗂️", color: "#1C1710", title: "25 torneos registrados",
     msg: "Esa es una historia completa de tu juego — de tu primer torneo a hoy, todo queda registrado." },
   50: { icon: "🙌", color: "#141210", title: "50 torneos registrados",
     msg: "Gracias por construir esto con nosotros desde el principio — tu historial ya es parte de la comunidad de Deck Shield." },
@@ -666,9 +666,9 @@ async function checkResultAchievements(customerId, tournament) {
       const esComprador = (compra?.total_orders ?? 0) > 0;
       if (await intentarDesbloquear(customerId, "vol_1")) {
         unlocked.push(esComprador
-          ? { key: "vol_1", icon: "🎉", color: "#182338", title: "¡Primer torneo registrado!",
+          ? { key: "vol_1", icon: "🎉", color: "#3A2F1F", title: "¡Primer torneo registrado!",
               msg: "Gracias por confiar en Deck Shield tanto en tus compras como ahora en tu juego — no solo te protegemos las cartas, también te acompañamos en el camino competitivo." }
-          : { key: "vol_1", icon: "🎉", color: "#182338", title: "¡Primer torneo registrado!",
+          : { key: "vol_1", icon: "🎉", color: "#3A2F1F", title: "¡Primer torneo registrado!",
               msg: "Desde ahora Deck Shield lleva la cuenta por ti — mira tu resultado en \"Mis Estadísticas\"." });
       }
     } else {
@@ -686,13 +686,13 @@ async function checkResultAchievements(customerId, tournament) {
     if (tipo === "Challenge") {
       const veces = torneos.filter(t => t.tournament_type === "Challenge" && t.result === "Ganador").length;
       if (veces === 1 && await intentarDesbloquear(customerId, "logro_primer_challenge")) {
-        unlocked.push({ key: "logro_primer_challenge", icon: "🏆", color: "#182338", title: "Challenge ganado",
+        unlocked.push({ key: "logro_primer_challenge", icon: "🏆", color: "#332A1C", title: "Challenge ganado",
           msg: "Quedó registrada tu primera victoria en un Challenge dentro de Deck Shield." });
       }
     } else if (tipo === "Cup") {
       const veces = torneos.filter(t => t.tournament_type === "Cup" && t.result === "Ganador").length;
       if (veces === 1 && await intentarDesbloquear(customerId, "logro_primer_cup")) {
-        unlocked.push({ key: "logro_primer_cup", icon: "🏆", color: "#5C2430", title: "Cup ganado",
+        unlocked.push({ key: "logro_primer_cup", icon: "🏆", color: "#2C2318", title: "Cup ganado",
           msg: "Quedó registrada tu primera victoria en un Cup dentro de Deck Shield." });
       }
     } else if (!BIG_EVENTS.includes(tipo)) {
@@ -700,7 +700,7 @@ async function checkResultAchievements(customerId, tournament) {
       // ya quedan cubiertos abajo con un mensaje más específico.
       const veces = torneos.filter(t => t.result === "Ganador").length;
       if (veces === 1 && await intentarDesbloquear(customerId, "logro_primera_victoria")) {
-        unlocked.push({ key: "logro_primera_victoria", icon: "🏆", color: "#182338", title: "¡Torneo ganado!",
+        unlocked.push({ key: "logro_primera_victoria", icon: "🏆", color: "#3A2F1F", title: "¡Torneo ganado!",
           msg: "Registraste tu primer torneo ganado en Deck Shield. Sea tu primer título o el número 50, desde ahora queda guardado acá." });
       }
     }
@@ -709,7 +709,7 @@ async function checkResultAchievements(customerId, tournament) {
   if (BIG_EVENTS.includes(tipo)) {
     const vecesEsteTipo = torneos.filter(t => t.tournament_type === tipo).length;
     if (vecesEsteTipo === 1 && await intentarDesbloquear(customerId, `logro_primer_${tipo.toLowerCase()}`)) {
-      unlocked.push({ key: `logro_primer_${tipo.toLowerCase()}`, icon: "🚩", color: "#173F32", title: "Nuevo nivel",
+      unlocked.push({ key: `logro_primer_${tipo.toLowerCase()}`, icon: "🚩", color: "#241D14", title: "Nuevo nivel",
         msg: `Registraste tu primer ${tipo} en Deck Shield. Quedará guardado en tu historial acá desde ahora.` });
     }
 
@@ -757,17 +757,17 @@ async function checkDeckAchievements(customerId, myDeck, thisRoundOutcome, thisR
   const total = wins + losses + ties;
 
   if (total >= 3 && await intentarDesbloquear(customerId, `mazo_muestra_${key}`)) {
-    unlocked.push({ key: `mazo_muestra_${key}`, icon: "🧩", color: "#3E4F5C", title: "Mazo con muestra sólida",
+    unlocked.push({ key: `mazo_muestra_${key}`, icon: "🧩", color: "#332A1C", title: "Mazo con muestra sólida",
       msg: "Ya tienes 3 partidas registradas con {mazo}. Suficiente para empezar a ver un patrón real.", deck: myDeck });
   }
   if (total >= 10 && await intentarDesbloquear(customerId, `mazo_consolidado_${key}`)) {
-    unlocked.push({ key: `mazo_consolidado_${key}`, icon: "🧩", color: "#173F32", title: "Mazo consolidado",
+    unlocked.push({ key: `mazo_consolidado_${key}`, icon: "🧩", color: "#241D14", title: "Mazo consolidado",
       msg: "10 partidas con {mazo} — ya no es una racha, es tu mazo de verdad. ¿Qué tan bien te ha ido? Revísalo en tus estadísticas.", deck: myDeck });
   }
   const decisivas = wins + losses;
   const winrate = decisivas > 0 ? wins / decisivas : 0;
   if (decisivas >= 5 && winrate >= 0.6 && await intentarDesbloquear(customerId, `mazo_fuerte_${key}`)) {
-    unlocked.push({ key: `mazo_fuerte_${key}`, icon: "💪", color: "#0E4C52", title: "Mazo fuerte",
+    unlocked.push({ key: `mazo_fuerte_${key}`, icon: "💪", color: "#1C1710", title: "Mazo fuerte",
       msg: `{mazo} va con ${Math.round(winrate * 100)}% en ${total} partidas — tienes un mazo fuerte entre manos.`, deck: myDeck });
   }
 
@@ -775,7 +775,7 @@ async function checkDeckAchievements(customerId, myDeck, thisRoundOutcome, thisR
     const top = meta?.ok ? meta.archetypes[0] : null;
     if (top && deckKey(thisRoundOpponentDeck) === deckKey({ p1: top.p1, p2: top.p2 })) {
       if (await intentarDesbloquear(customerId, "mazo_vencio_meta1")) {
-        unlocked.push({ key: "mazo_vencio_meta1", icon: "🎯", color: "#5C2430", title: "¡Gran resultado!",
+        unlocked.push({ key: "mazo_vencio_meta1", icon: "🎯", color: "#141210", title: "¡Gran resultado!",
           msg: "Le ganaste al mazo #1 del meta actual ({mazo}). Buen resultado contra lo que más se está jugando.",
           deck: { p1: top.p1, p2: top.p2 } });
       }
