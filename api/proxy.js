@@ -250,6 +250,57 @@ function deckKey(deck) {
   return `${p1}|${p2key}`;
 }
 
+/* =========================
+   Equivalencias de mazos (tabla deck_aliases)
+   ---------------------------------------------------------------------
+   Algunos mazos se registran con dos nombres para lo mismo (ej. "Lucario /
+   Hariyama" cuando en realidad es "Mega Lucario / Hariyama"). Cada fila de
+   deck_aliases dice "este mazo (from_deck) cuenta como este otro (to_deck)".
+   Solo se usa para CALCULAR estadísticas (meta y tier list); nunca modifica
+   lo que cada usuario registró. `until` (opcional): la equivalencia solo vale
+   para torneos jugados hasta esa fecha — sirve para "cerrar" una regla si un
+   día ese mazo pasa a ser legítimo. Un solo salto: A->B, no cadenas.
+   Nunca lanza: si la tabla no existe o falla, simplemente no hay equivalencias.
+========================= */
+const ALIAS_CACHE_MS = 60 * 1000;
+let aliasCache = { at: 0, list: [] };
+
+async function getDeckAliases() {
+  const now = Date.now();
+  if (now - aliasCache.at < ALIAS_CACHE_MS) return aliasCache.list;
+  let list = [];
+  try {
+    const { data, error } = await supabase
+      .from("deck_aliases")
+      .select("from_deck, to_deck, until");
+    if (!error && Array.isArray(data)) {
+      for (const r of data) {
+        const fromKey = deckKey(r.from_deck);
+        const to = r.to_deck;
+        if (!fromKey || !to || to.p1 == null || to.p2 == null) continue;
+        list.push({ from: r.from_deck, to: { p1: to.p1, p2: to.p2 }, until: r.until || null, fromKey });
+      }
+    }
+  } catch (e) {
+    list = [];
+  }
+  aliasCache = { at: now, list };
+  return list;
+}
+
+// Devuelve el mazo "oficial" al que equivale `deck` (o el mismo si no hay regla).
+// `date` = fecha del torneo (YYYY-MM-DD); si no se conoce, no se aplica `until`.
+function canonicalDeck(deck, date, aliases) {
+  if (!deck || deck.p1 == null || !aliases || !aliases.length) return deck;
+  const key = deckKey(deck);
+  for (const a of aliases) {
+    if (a.fromKey !== key) continue;
+    if (a.until && date && date > a.until) continue;
+    return { p1: a.to.p1, p2: a.to.p2 };
+  }
+  return deck;
+}
+
 // Resultado de UNA ronda (W/L/T), misma lógica que computeScore pero por ronda
 // individual en vez de acumulada — se usa para el cálculo del meta de arquetipos.
 function roundOutcome(r) {
@@ -308,34 +359,35 @@ async function buildArchetypeStats(rangeDays) {
     const cutoff = new Date(Date.now() - rangeDays * 86400000).toISOString().slice(0, 10);
     query = query.gte("tournament_date", cutoff);
   }
-  const { data, error } = await query;
+  const [{ data, error }, aliases] = await Promise.all([query, getDeckAliases()]);
   if (error) return null;
 
   const stats = new Map();
   for (const t of (data || [])) {
     const rounds = Array.isArray(t.rounds) ? t.rounds : [];
+    const myDeck = canonicalDeck(t.my_deck, t.tournament_date, aliases);
     for (const r of rounds) {
       const outcome = roundOutcome(r);
       if (!outcome) continue;
 
       // Mi deck se acredita con el resultado tal cual lo viví.
-      addArchetypeResult(stats, t.my_deck, outcome);
+      addArchetypeResult(stats, myDeck, outcome);
 
       // El deck del rival se acredita con el resultado inverso — así un mirror
       // match (mismo deck de ambos lados) no infla el winrate del arquetipo:
       // mi victoria es necesariamente una derrota para ese mismo mazo del otro lado.
       const opponentOutcome = outcome === "W" ? "L" : outcome === "L" ? "W" : "T";
-      addArchetypeResult(stats, r.opponent_deck, opponentOutcome);
+      addArchetypeResult(stats, canonicalDeck(r.opponent_deck, t.tournament_date, aliases), opponentOutcome);
     }
   }
   return stats;
 }
 
-function archetypesFromStats(stats, limit) {
+function archetypesFromStats(stats, limit, minSample = META_MIN_SAMPLE) {
   const archetypes = [];
   for (const entry of stats.values()) {
     const total = entry.wins + entry.losses + entry.ties;
-    if (total < META_MIN_SAMPLE) continue;
+    if (total < minSample) continue;
     // Winrate = victorias / (victorias + derrotas) — los empates quedan
     // fuera del cálculo (no cuentan ni a favor ni en contra), a diferencia
     // de `total` (que sí los incluye, como tamaño de muestra real).
@@ -376,12 +428,29 @@ function tierFor(winrate) {
 
 const META_RANGE_DAYS = { today: 1, "3d": 3, "7d": 7, "30d": 30 };
 
+// Partidas mínimas para figurar en cada tier: un mazo con buen winrate pero
+// pocas partidas no puede estar arriba — baja al tier más alto cuyo mínimo sí
+// cumple (S: 40 · A: 30 · B: 15 · C: 10). Bajo 10 partidas no aparece.
+const TIER_ORDER = ["S", "A", "B", "C"];
+const TIER_MIN_SAMPLE = { S: 40, A: 30, B: 15, C: 10 };
+
+function tierWithSample(winrate, total) {
+  for (let i = TIER_ORDER.indexOf(tierFor(winrate)); i < TIER_ORDER.length; i++) {
+    if (total >= TIER_MIN_SAMPLE[TIER_ORDER[i]]) return TIER_ORDER[i];
+  }
+  return null;
+}
+
 async function getMetaTierList(range) {
   const rangeDays = META_RANGE_DAYS[range] ?? null;
   const stats = await buildArchetypeStats(rangeDays);
   if (!stats) return { ok: false, error: "No se pudo calcular el meta" };
-  const archetypes = archetypesFromStats(stats, 30).map(a => ({ ...a, tier: tierFor(a.winrate) }));
-  return { ok: true, archetypes, range: range || "all" };
+  const archetypes = archetypesFromStats(stats, Infinity, TIER_MIN_SAMPLE.C)
+    .map(a => ({ ...a, tier: tierWithSample(a.winrate, a.total) }))
+    .filter(a => a.tier)
+    .sort((a, b) => TIER_ORDER.indexOf(a.tier) - TIER_ORDER.indexOf(b.tier) || b.winrate - a.winrate || b.total - a.total)
+    .slice(0, 30);
+  return { ok: true, archetypes, range: range || "all", min_sample: TIER_MIN_SAMPLE.C };
 }
 
 async function createTournament(customerId, q) {
@@ -759,9 +828,10 @@ async function checkDeckAchievements(customerId, myDeck, thisRoundOutcome, thisR
   // paralelo (Promise.all) en vez de una detrás de otra, para no sumar
   // dos viajes de ida y vuelta a Supabase donde con uno alcanza.
   const wantsMetaCheck = thisRoundOutcome === "W" && !!thisRoundOpponentDeck;
-  const [deckRes, meta] = await Promise.all([
+  const [deckRes, meta, aliases] = await Promise.all([
     supabase.from("tournaments").select("my_deck, rounds").eq("customer_id", customerId),
     wantsMetaCheck ? getMetaArchetypes() : Promise.resolve(null),
+    wantsMetaCheck ? getDeckAliases() : Promise.resolve([]),
   ]);
   const data = deckRes.data;
 
@@ -794,7 +864,9 @@ async function checkDeckAchievements(customerId, myDeck, thisRoundOutcome, thisR
 
   if (wantsMetaCheck) {
     const top = meta?.ok ? meta.archetypes[0] : null;
-    if (top && deckKey(thisRoundOpponentDeck) === deckKey({ p1: top.p1, p2: top.p2 })) {
+    // El meta ya viene con equivalencias aplicadas: se compara contra el rival "oficial".
+    const oppCanon = canonicalDeck(thisRoundOpponentDeck, new Date().toISOString().slice(0, 10), aliases);
+    if (top && deckKey(oppCanon) === deckKey({ p1: top.p1, p2: top.p2 })) {
       if (await intentarDesbloquear(customerId, "mazo_vencio_meta1")) {
         unlocked.push({ key: "mazo_vencio_meta1", icon: "🎯", color: "#141210", title: "¡Gran resultado!",
           msg: "Le ganaste al mazo #1 del meta actual ({mazo}). Buen resultado contra lo que más se está jugando.",
@@ -878,12 +950,15 @@ async function runAction(customerId, action, q) {
       return await getTournamentOwned(customerId, q.id);
 
     case "list_tournaments": {
-      // El presupuesto viaja junto al listado para no sumar otro viaje al servidor.
-      const [tournaments, budget] = await Promise.all([
+      // El presupuesto y las equivalencias de mazos viajan junto al listado
+      // para no sumar otro viaje al servidor.
+      const [tournaments, budget, aliases] = await Promise.all([
         listTournaments(customerId),
         getBudget(customerId),
+        getDeckAliases(),
       ]);
-      return { ok: true, tournaments, budget };
+      const deck_aliases = aliases.map(a => ({ from: a.from, to: a.to, until: a.until }));
+      return { ok: true, tournaments, budget, deck_aliases };
     }
 
     case "set_budget":
