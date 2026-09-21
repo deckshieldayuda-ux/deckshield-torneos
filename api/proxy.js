@@ -67,6 +67,21 @@ function normalizeWentFirst(v) {
   return undefined;
 }
 
+// Costo de inscripción del torneo, en pesos chilenos enteros (sin decimales).
+// undefined = no se tocó este campo; null = "no registrado" (opcional);
+// 0 = torneo gratuito; >0 = monto pagado.
+function normalizeCost(v) {
+  if (v === undefined) return undefined;
+  if (v === null || v === "" || v === "null") return null;
+
+  const digits = String(v).replace(/[^\d]/g, "");
+  if (!digits) return undefined;
+
+  const n = Number(digits);
+  if (!Number.isFinite(n) || n < 0) return undefined;
+  return Math.min(Math.round(n), 100000000);
+}
+
 // El "componente #2" de un deck puede ser un segundo Pokémon o una carta de
 // Entrenador/Ítem clave (ej. Crushing Hammer en un deck de un solo Pokémon).
 // undefined = no se tocó este campo; null = se limpió a propósito.
@@ -374,10 +389,13 @@ async function createTournament(customerId, q) {
     return { ok: false, error: "Missing required fields" };
   }
 
+  const cost = normalizeCost(q.cost);
+
   const { data, error } = await supabase
     .from("tournaments")
     .insert([{
       customer_id: customerId,
+      ...(cost != null ? { cost } : {}),
       tournament_name: q.tournament_name,
       tournament_date: q.tournament_date,
       format: q.format ?? null,
@@ -402,9 +420,12 @@ async function updateTournament(customerId, id, q) {
     return { ok: false, error: "Missing required fields" };
   }
 
+  const cost = normalizeCost(q.cost);
+
   const { data, error } = await supabase
     .from("tournaments")
     .update({
+      ...(cost !== undefined ? { cost } : {}),
       tournament_name: q.tournament_name,
       tournament_date: q.tournament_date,
       format: q.format ?? null,
@@ -785,6 +806,58 @@ async function checkDeckAchievements(customerId, myDeck, thisRoundOutcome, thisR
   return unlocked;
 }
 
+/* =========================
+   Presupuesto de gasto
+   ---------------------------------------------------------------------
+   Un presupuesto por usuario (tabla user_budgets, customer_id único):
+   monto en pesos enteros y período "weekly" o "monthly". Monto vacío o 0
+   quita el presupuesto. La alerta de "te pasaste" se calcula en la
+   página con los torneos del usuario — acá solo se guarda el valor.
+========================= */
+async function getBudget(customerId) {
+  try {
+    const { data, error } = await supabase
+      .from("user_budgets")
+      .select("amount, period")
+      .eq("customer_id", customerId)
+      .maybeSingle();
+    if (error) return null;
+    return data || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function setBudget(customerId, q) {
+  const amount = normalizeCost(q.amount);
+  if (amount === undefined) return { ok: false, error: "Invalid amount" };
+
+  if (amount === null || amount === 0) {
+    const { error } = await supabase
+      .from("user_budgets")
+      .delete()
+      .eq("customer_id", customerId);
+    if (error) return { ok: false, error: "No se pudo quitar el presupuesto" };
+    return { ok: true, budget: null };
+  }
+
+  if (q.period !== "weekly" && q.period !== "monthly") {
+    return { ok: false, error: "Invalid period" };
+  }
+
+  const { data, error } = await supabase
+    .from("user_budgets")
+    .upsert(
+      { customer_id: customerId, amount, period: q.period, updated_at: new Date().toISOString() },
+      { onConflict: "customer_id" }
+    )
+    .select("amount, period")
+    .single();
+
+  if (error) return { ok: false, error: "No se pudo guardar el presupuesto" };
+  return { ok: true, budget: data };
+}
+
 // Deja un registro liviano de uso para reportería (usuarios activos, nuevos,
 // frecuencia, etc.). Nunca debe poder romper ni retrasar de forma relevante
 // la respuesta real: cualquier falla (tabla no existe, Supabase lento, lo que
@@ -804,8 +877,17 @@ async function runAction(customerId, action, q) {
     case "get_tournament":
       return await getTournamentOwned(customerId, q.id);
 
-    case "list_tournaments":
-      return { ok: true, tournaments: await listTournaments(customerId) };
+    case "list_tournaments": {
+      // El presupuesto viaja junto al listado para no sumar otro viaje al servidor.
+      const [tournaments, budget] = await Promise.all([
+        listTournaments(customerId),
+        getBudget(customerId),
+      ]);
+      return { ok: true, tournaments, budget };
+    }
+
+    case "set_budget":
+      return await setBudget(customerId, q);
 
     case "get_meta_archetypes":
       return await getMetaArchetypes();
