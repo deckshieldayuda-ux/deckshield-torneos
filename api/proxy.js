@@ -4,6 +4,12 @@ import { supabase } from "./_lib/supabase.js";
 /* =========================
    Shopify App Proxy Verify
 ========================= */
+// Una request firmada capturada una vez (ej. en el historial del navegador,
+// o en un log de proxy) no debe poder reenviarse indefinidamente — Shopify
+// incluye "timestamp" (epoch segundos) en todo request de App Proxy, así
+// que se rechaza cualquiera con más de 90s de antigüedad.
+const MAX_TIMESTAMP_SKEW_SECONDS = 90;
+
 function verifyShopifyProxy(query) {
   const { signature, ...rest } = query;
   if (!signature) return false;
@@ -18,12 +24,75 @@ function verifyShopifyProxy(query) {
     .update(message)
     .digest("hex");
 
-  return generatedSignature === signature;
+  const expected = Buffer.from(generatedSignature, "utf8");
+  const received = Buffer.from(String(signature), "utf8");
+  if (expected.length !== received.length) return false;
+  if (!crypto.timingSafeEqual(expected, received)) return false;
+
+  const ts = Number(rest.timestamp);
+  if (!Number.isFinite(ts)) return false;
+  const skew = Math.abs(Math.floor(Date.now() / 1000) - ts);
+  if (skew > MAX_TIMESTAMP_SKEW_SECONDS) return false;
+
+  return true;
+}
+
+/* =========================
+   CSRF token (anti-forgía)
+   ---------------------------------------------------------------------
+   El App Proxy de Shopify firma CUALQUIER request que llegue a la ruta de la
+   app, sin importar qué la disparó — un <img>/formulario en un sitio externo
+   puede lograr que el navegador de una víctima logueada dispare una acción
+   real (borrar torneo, editar ronda) sin que ella haga nada en deckshield.cl.
+   Este token no reemplaza la firma de Shopify: la complementa. Se deriva
+   matemáticamente (HMAC) del customer_id + una ventana de 5 minutos, sin
+   necesitar guardar nada en la base de datos. Un atacante puede lograr que
+   el navegador de la víctima DISPARE la request que pide el token, pero
+   nunca puede LEER la respuesta (el navegador se lo impide, por ser de otro
+   sitio) — así que jamás consigue el valor real para adjuntarlo a una
+   acción falsificada.
+========================= */
+const CSRF_WINDOW_MS = 5 * 60 * 1000;
+
+function _csrfWindow(offset = 0) {
+  return Math.floor(Date.now() / CSRF_WINDOW_MS) - offset;
+}
+
+function computeCsrfToken(customerId, windowIdx) {
+  return crypto
+    .createHmac("sha256", process.env.SHOPIFY_APP_PROXY_SECRET)
+    .update(`csrf:${customerId}:${windowIdx}`)
+    .digest("hex");
+}
+
+function _tokensMatch(a, b) {
+  const bufA = Buffer.from(String(a), "utf8");
+  const bufB = Buffer.from(String(b), "utf8");
+  return bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);
+}
+
+function verifyCsrfToken(customerId, token) {
+  if (!token) return false;
+  // Acepta la ventana actual y la anterior (holgura de hasta 5-10 min desde
+  // que el frontend pidió el token, para no romper una sesión larga).
+  return _tokensMatch(token, computeCsrfToken(customerId, _csrfWindow(0)))
+      || _tokensMatch(token, computeCsrfToken(customerId, _csrfWindow(1)));
 }
 
 /* =========================
    Helpers
 ========================= */
+// Texto libre (nombre de torneo, nombre de carta) llega sin validar desde
+// el cliente — el buscador del frontend restringe qué se puede ELEGIR, pero
+// nada impedía llamar la API directo con cualquier string. Se recorta el
+// largo y se descartan '<'/'>' para que no pueda guardarse markup/script
+// que después se muestre sin escapar en alguna pantalla (ej. Meta de
+// Arquetipos, que junta datos de todos los usuarios).
+function sanitizeText(v, maxLen) {
+  const s = (v ?? "").toString().trim().replace(/[<>]/g, "");
+  return s.slice(0, maxLen) || null;
+}
+
 function toIntOrNull(v) {
   if (v === undefined || v === null || v === "") return null;
   const n = Number(v);
@@ -88,9 +157,9 @@ function normalizeCost(v) {
 function buildDeckPiece(kind, id, name, image) {
   if (kind === undefined) return undefined;
   if (kind === "item") {
-    const cleanName = (name ?? "").toString().trim();
+    const cleanName = sanitizeText(name, 60);
     if (!cleanName) return null;
-    return { kind: "item", name: cleanName, image: (image ?? "").toString().trim() || null };
+    return { kind: "item", name: cleanName, image: sanitizeText(image, 500) };
   }
   if (kind === "pokemon") {
     const pid = toIntOrNull(id);
@@ -465,7 +534,7 @@ async function createTournament(customerId, q) {
     .insert([{
       customer_id: customerId,
       ...(cost != null ? { cost } : {}),
-      tournament_name: q.tournament_name,
+      tournament_name: sanitizeText(q.tournament_name, 80),
       tournament_date: q.tournament_date,
       format: q.format ?? null,
       tournament_type: q.tournament_type ?? null,
@@ -495,7 +564,7 @@ async function updateTournament(customerId, id, q) {
     .from("tournaments")
     .update({
       ...(cost !== undefined ? { cost } : {}),
-      tournament_name: q.tournament_name,
+      tournament_name: sanitizeText(q.tournament_name, 80),
       tournament_date: q.tournament_date,
       format: q.format ?? null,
       tournament_type: q.tournament_type ?? null,
@@ -934,11 +1003,47 @@ async function setBudget(customerId, q) {
 // frecuencia, etc.). Nunca debe poder romper ni retrasar de forma relevante
 // la respuesta real: cualquier falla (tabla no existe, Supabase lento, lo que
 // sea) se traga acá mismo y no llega a afectar al usuario.
+// Devuelve si quedó registrado o no. Para las otras 12 acciones esto es solo
+// informativo (nunca les cambia su resultado, ver el handler más abajo); para
+// "share_image" ES el resultado completo de la acción (no hay ninguna otra
+// escritura detrás), así que ahí sí le importa a quien llamó.
 async function logEvent(customerId, action) {
   try {
-    await supabase.from("app_events").insert([{ customer_id: customerId, action }]);
+    const { error } = await supabase.from("app_events").insert([{ customer_id: customerId, action }]);
+    return !error;
   } catch (e) {
-    // silencioso a propósito
+    return false;
+  }
+}
+
+// Acciones que escriben datos: exigen el token anti-CSRF y cuentan para el
+// límite de acciones por minuto (ver más abajo). Leer/listar torneos no.
+const WRITE_ACTIONS = new Set([
+  "create_tournament", "update_tournament", "add_round", "delete_last_round",
+  "move_round", "update_round", "delete_tournament", "set_final_result", "set_budget",
+]);
+
+// Sin esto, una sola cuenta (gratis y automática de crear) podía llamar
+// create_tournament sin límite — suficiente para inflar/ensuciar el Meta de
+// Arquetipos (que se calcula sobre TODOS los usuarios) o simplemente saturar
+// la base. Se reusa app_events (ya se registra en cada acción) como bitácora
+// para contar cuántas acciones de escritura hizo ese cliente en la última
+// ventana, sin necesitar infraestructura nueva (Redis/KV).
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX_ACTIONS = 20;
+
+async function isRateLimited(customerId) {
+  try {
+    const since = new Date(Date.now() - RATE_LIMIT_WINDOW_MS).toISOString();
+    const { count, error } = await supabase
+      .from("app_events")
+      .select("id", { count: "exact", head: true })
+      .eq("customer_id", customerId)
+      .gte("created_at", since);
+    if (error) return false; // si no se puede consultar, no bloqueamos por las dudas
+    return (count ?? 0) >= RATE_LIMIT_MAX_ACTIONS;
+  } catch (e) {
+    return false;
   }
 }
 
@@ -946,6 +1051,9 @@ async function logEvent(customerId, action) {
 // en paralelo con logEvent() en vez de esperar a que termine primero.
 async function runAction(customerId, action, q) {
   switch (action) {
+    case "get_csrf_token":
+      return { ok: true, csrf: computeCsrfToken(customerId, _csrfWindow(0)) };
+
     case "get_tournament":
       return await getTournamentOwned(customerId, q.id);
 
@@ -995,8 +1103,9 @@ async function runAction(customerId, action, q) {
       return await setFinalResult(customerId, q.id, q.result);
 
     case "share_image":
-      // La imagen se genera y descarga 100% en el navegador (Canvas), acá
-      // solo interesa que logEvent() haya quedado registrado.
+      // La imagen se genera y descarga 100% en el navegador (Canvas); esta
+      // acción no tiene ninguna otra escritura — el handler reemplaza esta
+      // respuesta con el resultado real de logEvent() (ver más abajo).
       return { ok: true };
 
     default:
@@ -1017,12 +1126,30 @@ export default async function handler(req, res) {
 
   if (!customerId) return res.json({ ok: false, logged_in: false, error: "Debes iniciar sesión con tu cuenta de Deck Shield para registrar o ver tus torneos." });
 
+  // Las acciones que escriben datos exigen el token anti-CSRF (ver más
+  // arriba) y cuentan para el límite de acciones por minuto — ninguna de
+  // las dos cosas aplica a leer/listar torneos, así que esa parte de la
+  // app sigue exactamente igual de rápida que antes.
+  if (WRITE_ACTIONS.has(action)) {
+    if (!verifyCsrfToken(customerId, req.query.csrf)) {
+      return res.status(403).json({ ok: false, error: "Sesión no verificada — recarga la página e inténtalo de nuevo." });
+    }
+    if (await isRateLimited(customerId)) {
+      return res.status(429).json({ ok: false, error: "Demasiadas acciones seguidas — espera un minuto e inténtalo de nuevo." });
+    }
+  }
+
   // logEvent() y la acción real no dependen una de la otra — antes se
   // esperaba el registro de uso ANTES de arrancar cualquier otra cosa, en
   // las 13 acciones de la app. Ahora van en paralelo.
-  const [, result] = await Promise.all([
+  const [logOk, result] = await Promise.all([
     logEvent(customerId, action),
     runAction(customerId, action, req.query),
   ]);
+  // "share_image" es la única acción donde el registro de uso ES la acción
+  // completa (no hay ninguna otra escritura) — ahí sí debe fallar de verdad
+  // si no quedó guardado, para que la página lo note y reintente. En las
+  // otras 12 el registro sigue siendo secundario: nunca les cambia el resultado.
+  if (action === "share_image") return res.json({ ok: logOk });
   return res.json(result);
 }
