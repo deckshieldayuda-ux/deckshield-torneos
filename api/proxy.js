@@ -113,7 +113,7 @@ function normalizeWinCondition(v) {
   if (v === null || v === "" || v === "null") return null;
 
   const up = String(v).toUpperCase();
-  if (up === "PRIZES" || up === "NO_POKEMON" || up === "DECK_OUT") return up;
+  if (up === "PRIZES" || up === "NO_POKEMON" || up === "DECK_OUT" || up === "CONCESSION") return up;
   return undefined;
 }
 
@@ -687,16 +687,22 @@ async function updateRound(customerId, id, q) {
   if (g1 !== undefined) r.games[0].result = g1;
   const g1wc = normalizeWinCondition(q.g1_wc);
   if (g1wc !== undefined) r.games[0].win_condition = g1wc;
+  const g1turn = normalizeWentFirst(q.turn1);
+  if (g1turn !== undefined) r.games[0].turn = g1turn;
 
   const g2 = normalizeResult(q.g2);
   if (g2 !== undefined) r.games[1].result = g2;
   const g2wc = normalizeWinCondition(q.g2_wc);
   if (g2wc !== undefined) r.games[1].win_condition = g2wc;
+  const g2turn = normalizeWentFirst(q.turn2);
+  if (g2turn !== undefined) r.games[1].turn = g2turn;
 
   const g3 = normalizeResult(q.g3);
   if (g3 !== undefined) r.games[2].result = g3;
   const g3wc = normalizeWinCondition(q.g3_wc);
   if (g3wc !== undefined) r.games[2].win_condition = g3wc;
+  const g3turn = normalizeWentFirst(q.turn3);
+  if (g3turn !== undefined) r.games[2].turn = g3turn;
 
   rounds[idx] = r;
 
