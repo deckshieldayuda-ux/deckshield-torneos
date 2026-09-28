@@ -1007,9 +1007,16 @@ async function setBudget(customerId, q) {
 // informativo (nunca les cambia su resultado, ver el handler más abajo); para
 // "share_image" ES el resultado completo de la acción (no hay ninguna otra
 // escritura detrás), así que ahí sí le importa a quien llamó.
-async function logEvent(customerId, action) {
+// tournamentId (opcional): solo lo manda el handler para "share_image", para
+// saber CUÁL torneo se compartió sin tener que adivinarlo después por hora
+// (antes, la reportería adivinaba por cercanía en el tiempo con los torneos
+// del cliente, y con clics seguidos podía acertarle a uno dos veces y
+// dejar otro sin ninguno).
+async function logEvent(customerId, action, tournamentId) {
   try {
-    const { error } = await supabase.from("app_events").insert([{ customer_id: customerId, action }]);
+    const { error } = await supabase
+      .from("app_events")
+      .insert([{ customer_id: customerId, action, tournament_id: tournamentId || null }]);
     return !error;
   } catch (e) {
     return false;
@@ -1143,7 +1150,7 @@ export default async function handler(req, res) {
   // esperaba el registro de uso ANTES de arrancar cualquier otra cosa, en
   // las 13 acciones de la app. Ahora van en paralelo.
   const [logOk, result] = await Promise.all([
-    logEvent(customerId, action),
+    logEvent(customerId, action, action === "share_image" ? req.query.id : null),
     runAction(customerId, action, req.query),
   ]);
   // "share_image" es la única acción donde el registro de uso ES la acción
